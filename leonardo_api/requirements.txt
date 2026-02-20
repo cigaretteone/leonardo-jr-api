@@ -1,0 +1,29 @@
+# Leonardo Jr. バックエンド API 依存ライブラリ
+# Python 3.11 以上を想定
+
+# Web フレームワーク
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9        # Form データ受け取り用
+
+# DB
+sqlalchemy[asyncio]>=2.0.30
+asyncpg>=0.29.0                # PostgreSQL 非同期ドライバ
+
+# 設定管理
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+
+# 認証
+python-jose[cryptography]>=3.3.0   # JWT
+passlib[bcrypt]>=1.7.4             # パスワードハッシュ
+
+# HTTP クライアント（IPジオロケーション API 呼び出し）
+httpx>=0.27.0
+
+# メール送信
+aiosmtplib>=3.0.1
+
+# テスト
+pytest>=7.4.0
+pytest-asyncio>=0.23.0

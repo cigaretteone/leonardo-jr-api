@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# 環境変数（秘密情報を含むため絶対にコミットしない）
+.env
+*.env
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# エディタ
+.vscode/
+.idea/
+
+# デバイス側の生成物（実機では /etc/leonardo/ に配置）
+device/scripts/__pycache__/
