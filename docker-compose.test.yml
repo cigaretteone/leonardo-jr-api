@@ -1,0 +1,56 @@
+# docker-compose.test.yml — 結合テスト用 PostgreSQL コンテナ
+#
+# 使い方:
+#   1. コンテナ起動
+#        docker compose -f docker-compose.test.yml up -d
+#
+#   2. スキーマ適用（初回のみ）
+#        docker compose -f docker-compose.test.yml exec postgres \
+#          psql -U postgres -d leonardo_jr_test \
+#          -f /migrations/001_initial_schema.sql
+#
+#      または python から:
+#        TEST_DATABASE_URL=postgresql+asyncpg://postgres:testpass@localhost:5433/leonardo_jr_test \
+#        python -c "
+#        import asyncio
+#        from sqlalchemy.ext.asyncio import create_async_engine
+#        from leonardo_api.database import Base
+#        engine = create_async_engine('postgresql+asyncpg://postgres:testpass@localhost:5433/leonardo_jr_test')
+#        asyncio.run(engine.begin().__aenter__().__class__.run_sync(Base.metadata.create_all))
+#        "
+#
+#   3. 結合テスト実行
+#        TEST_DATABASE_URL=postgresql+asyncpg://postgres:testpass@localhost:5433/leonardo_jr_test \
+#        pytest tests/test_integration.py -v -m integration
+#
+#   4. コンテナ停止
+#        docker compose -f docker-compose.test.yml down
+#
+# 注意:
+#   - ポート 5433 を使用（本番 PostgreSQL の 5432 と競合しないよう）
+#   - テスト後のデータは pytest が TRUNCATE で自動クリーンアップする
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: leonardo_jr_test_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: leonardo_jr_test
+    ports:
+      - "5433:5432"       # ホスト側 5433 → コンテナ内 5432
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+      # マイグレーション SQL を自動適用（初回起動時のみ）
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d leonardo_jr_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_test_data:
+    driver: local

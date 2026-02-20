@@ -1,0 +1,8 @@
+# Leonardo Jr. デバイス側依存ライブラリ
+# Raspberry Pi 5 + Python 3.11 以上を想定
+
+# QRコード生成（Pillow はPNG保存に必要）
+qrcode[pil]>=7.4.2
+
+# テスト
+pytest>=7.4.0

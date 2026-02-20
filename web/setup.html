@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<!--
+  Leonardo Jr. QR初期設定 Webセットアップ画面
+  Phase 4 実装
+
+  開き方:
+    QRコード読み取り後ブラウザが以下URLで本ページを開く:
+    https://setup.leonardo-jr.jp/register?device_id={device_id}&fth={factory_token_hash}
+
+  技術スタック:
+    - Vanilla JS (フレームワークなし)
+    - Tailwind CSS (CDN)
+    - Leaflet.js + OpenStreetMap (地図)
+    - Geolocation API (スマホGPS)
+
+  ステップ構成:
+    1. ログイン / 新規登録
+    2. デバイス登録確認
+    3. セットアップ (通知先・検知対象)
+    4. 位置登録 (GPS + 地図)
+    5. 完了
+-->
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <!-- スマホでの表示最適化。maximum-scale=1でダブルタップズームを防ぐ -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Leonardo Jr. セットアップ</title>
+
+  <!-- Tailwind CSS (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Leaflet.js (地図表示) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV/XN/WLs=" crossorigin=""></script>
+
+  <style>
+    /* Leafletの地図コンテナ高さ固定 */
+    #map { height: 260px; }
+    /* ローディングスピナー */
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.4);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+
+<body class="bg-gray-50 min-h-screen text-gray-900" style="font-family: -apple-system, 'Helvetica Neue', sans-serif;">
+
+<!-- ===================================================================
+     ヘッダー
+=================================================================== -->
+<header class="bg-white border-b border-gray-200 px-5 py-3 flex items-center sticky top-0 z-50">
+  <span class="text-base font-bold text-gray-800 tracking-tight">Leonardo Jr.</span>
+  <span class="ml-2 text-xs text-gray-400 font-normal">初期セットアップ</span>
+</header>
+
+<!-- ===================================================================
+     プログレスバー + ステップ表示
+=================================================================== -->
+<div id="progress-area" class="bg-white px-5 pt-3 pb-2 border-b border-gray-100 sticky top-12 z-40">
+  <div class="flex gap-1 mb-1">
+    <div id="prog-1" class="h-1 flex-1 rounded-full transition-all duration-300 bg-blue-500"></div>
+    <div id="prog-2" class="h-1 flex-1 rounded-full transition-all duration-300 bg-gray-200"></div>
+    <div id="prog-3" class="h-1 flex-1 rounded-full transition-all duration-300 bg-gray-200"></div>
+    <div id="prog-4" class="h-1 flex-1 rounded-full transition-all duration-300 bg-gray-200"></div>
+    <div id="prog-5" class="h-1 flex-1 rounded-full transition-all duration-300 bg-gray-200"></div>
+  </div>
+  <p id="step-label" class="text-xs text-gray-400"></p>
+</div>
+
+<!-- ===================================================================
+     エラーバナー（全ステップ共通）
+=================================================================== -->
+<div id="error-banner"
+     class="hidden mx-4 mt-4 bg-red-50 border border-red-300 text-red-700 rounded-xl px-4 py-3 text-sm leading-relaxed">
+  <span id="error-text"></span>
+</div>
+
+<!-- ===================================================================
+     メインコンテンツ
+=================================================================== -->
+<main class="px-4 py-5 max-w-lg mx-auto space-y-4 pb-16">
+
+  <!-- =================================================================
+       Step 1: ログイン / 新規登録
+  ================================================================= -->
+  <section id="step-1" class="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+    <h2 class="text-lg font-bold mb-1">アカウント</h2>
+    <p class="text-xs text-gray-500 mb-5">ログインまたは新規登録してください</p>
+
+    <!-- タブ -->
+    <div class="flex border-b border-gray-200 mb-5">
+      <button id="tab-login" onclick="switchTab('login')"
+              class="flex-1 pb-2.5 text-sm font-semibold text-blue-600 border-b-2 border-blue-600 transition-colors">
+        ログイン
+      </button>
+      <button id="tab-register" onclick="switchTab('register')"
+              class="flex-1 pb-2.5 text-sm font-semibold text-gray-400 border-b-2 border-transparent transition-colors">
+        新規登録
+      </button>
+    </div>
+
+    <!-- ログインフォーム -->
+    <div id="form-login">
+      <label class="block text-xs font-medium text-gray-600 mb-1">メールアドレス</label>
+      <input id="login-email" type="email" inputmode="email" autocomplete="email"
+             placeholder="you@example.com"
+             class="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm mb-3
+                    focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent">
+
+      <label class="block text-xs font-medium text-gray-600 mb-1">パスワード</label>
+      <input id="login-password" type="password" autocomplete="current-password"
+             placeholder="パスワード"
+             class="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm mb-5
+                    focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent">
+
+      <button id="btn-login" onclick="handleLogin(this)"
+              class="w-full bg-blue-600 text-white rounded-xl py-3 text-sm font-semibold
+                     hover:bg-blue-700 active:scale-95 transition-all">
+        ログイン
+      </button>
+    </div>
+
+    <!-- 新規登録フォーム -->
+    <div id="form-register" class="hidden">
+      <label class="block text-xs font-medium text-gray-600 mb-1">メールアドレス</label>
+      <input id="reg-email" type="email" inputmode="email" autocomplete="email"
+             placeholder="you@example.com"
+             class="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm mb-3
+                    focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent">
+
+      <label class="block text-xs font-medium text-gray-600 mb-1">パスワード（8文字以上）</label>
+      <input id="reg-password" type="password" autocomplete="new-password"
+             placeholder="8文字以上"
+             class="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm mb-3
+                    focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent">
+
+      <label class="block text-xs font-medium text-gray-600 mb-1">電話番号（任意・通知用）</label>
+      <input id="reg-phone" type="tel" inputmode="tel" autocomplete="tel"
+             placeholder="090-0000-0000"
+             class="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm mb-5
+                    focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent">
+
+      <button id="btn-register" onclick="handleRegister(this)"
+              class="w-full bg-blue-600 text-white rounded-xl py-3 text-sm font-semibold
+                     hover:bg-blue-700 active:scale-95 transition-all">
+        アカウントを作成
+      </button>
+    </div>
+  </section>
+
+  <!-- =================================================================
+       Step 2: デバイス登録確認
+  ================================================================= -->
+  <section id="step-2" class="hidden bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+    <h2 class="text-lg font-bold mb-1">デバイスを登録</h2>
+    <p class="text-xs text-gray-500 mb-4">以下のデバイスをあなたのアカウントに紐付けます</p>
+
+    <div class="bg-gray-50 rounded-xl px-4 py-3 mb-5">
+      <p class="text-xs text-gray-400 mb-1">デバイス ID</p>
+      <p id="display-device-id" class="text-base font-mono font-bold text-gray-800 tracking-wide"></p>
+    </div>
+
+    <p class="text-sm text-gray-600 leading-relaxed mb-6">
+      このデバイスを登録すると、検知イベントの通知を受け取れるようになります。
+      QR コードは現場でデバイス本体のラベルから読み取ってください。
+    </p>
+
+    <button id="btn-device-register" onclick="handleDeviceRegister(this)"
+            class="w-full bg-blue-600 text-white rounded-xl py-3 text-sm font-semibold
+                   hover:bg-blue-700 active:scale-95 transition-all">
+      このデバイスを登録する
+    </button>
+  </section>
+
+  <!-- =================================================================
+       Step 3: セットアップ（通知先・検知対象）
+  ================================================================= -->
+  <section id="step-3" class="hidden bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+    <h2 class="text-lg font-bold mb-1">セットアップ</h2>
+    <p class="text-xs text-gray-500 mb-5">通知先と検知対象を設定します（後からダッシュボードで変更可）</p>
+
+    <!-- 通知先 -->
+    <p class="text-sm font-semibold text-gray-700 mb-3">通知先</p>
+
+    <label class="block text-xs font-medium text-gray-500 mb-1">LINE Notify トークン（任意）</label>
+    <input id="line-token" type="text" autocomplete="off"
+           placeholder="LINE Notify のアクセストークンを貼り付け"
+           class="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm mb-3
+                  focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent">
+
+    <label class="block text-xs font-medium text-gray-500 mb-1">通知用メールアドレス（任意）</label>
+    <input id="notify-email" type="email" inputmode="email"
+           placeholder="alert@example.com"
+           class="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm mb-6
+                  focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent">
+
+    <!-- 検知対象 -->
+    <p class="text-sm font-semibold text-gray-700 mb-3">検知対象</p>
+    <div class="space-y-3 mb-6">
+      <label class="flex items-center gap-3 cursor-pointer select-none">
+        <input type="checkbox" id="target-bear" value="bear" checked
+               class="w-4 h-4 rounded accent-blue-600">
+        <span class="text-sm text-gray-700">熊</span>
+      </label>
+      <label class="flex items-center gap-3 cursor-pointer select-none">
+        <input type="checkbox" id="target-human" value="human"
+               class="w-4 h-4 rounded accent-blue-600">
+        <span class="text-sm text-gray-700">人</span>
+      </label>
+      <label class="flex items-center gap-3 cursor-pointer select-none">
+        <input type="checkbox" id="target-vehicle" value="vehicle"
+               class="w-4 h-4 rounded accent-blue-600">
+        <span class="text-sm text-gray-700">車両</span>
+      </label>
+    </div>
+
+    <button id="btn-setup" onclick="handleSetup(this)"
+            class="w-full bg-blue-600 text-white rounded-xl py-3 text-sm font-semibold
+                   hover:bg-blue-700 active:scale-95 transition-all">
+      次へ（位置登録）
+    </button>
+  </section>
+
+  <!-- =================================================================
+       Step 4: 位置登録（GPS + 地図）
+  ================================================================= -->
+  <section id="step-4" class="hidden bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+    <h2 class="text-lg font-bold mb-1">設置場所を登録</h2>
+    <p class="text-xs text-gray-500 mb-4">
+      「現在地を取得」を押してデバイスの設置場所を GPS で登録します
+    </p>
+
+    <!-- 地図コンテナ -->
+    <div id="map" class="rounded-xl overflow-hidden mb-4 bg-gray-100 border border-gray-200"></div>
+
+    <!-- GPS 精度インジケーター（取得後に表示） -->
+    <div id="accuracy-card" class="hidden rounded-xl px-4 py-3 mb-3 border transition-all">
+      <div class="flex items-start gap-3">
+        <span id="accuracy-badge"
+              class="mt-0.5 inline-block w-2.5 h-2.5 rounded-full flex-shrink-0 mt-1"></span>
+        <div class="flex-1 min-w-0">
+          <p id="accuracy-title" class="text-sm font-semibold"></p>
+          <p id="accuracy-detail" class="text-xs text-gray-500 mt-0.5"></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 精度警告（50m 超で表示） -->
+    <div id="accuracy-warning"
+         class="hidden rounded-xl bg-yellow-50 border border-yellow-200 px-4 py-3 mb-4 text-xs text-yellow-800 leading-relaxed">
+    </div>
+
+    <!-- GPS 取得ボタン -->
+    <button id="btn-get-location" onclick="getLocation(this)"
+            class="w-full bg-gray-100 text-gray-700 rounded-xl py-3 text-sm font-semibold
+                   hover:bg-gray-200 active:scale-95 transition-all mb-3 border border-gray-200">
+      現在地を取得
+    </button>
+
+    <!-- 位置登録ボタン（GPS 取得後に有効化） -->
+    <button id="btn-register-location" onclick="handleLocationRegister(this)" disabled
+            class="w-full bg-blue-600 text-white rounded-xl py-3 text-sm font-semibold
+                   hover:bg-blue-700 active:scale-95 transition-all
+                   disabled:opacity-40 disabled:cursor-not-allowed">
+      この位置で登録
+    </button>
+
+    <!-- 精度の説明 -->
+    <div class="mt-4 bg-gray-50 rounded-xl px-4 py-3 border border-gray-100">
+      <p class="text-xs text-gray-500 leading-relaxed">
+        <span class="inline-block w-2 h-2 rounded-full bg-green-500 mr-1"></span>50m 以下：良好 &nbsp;
+        <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 mr-1"></span>50〜100m：やや低い &nbsp;
+        <span class="inline-block w-2 h-2 rounded-full bg-red-500 mr-1"></span>100m 超：低い（登録は可能）
+      </p>
+    </div>
+  </section>
+
+  <!-- =================================================================
+       Step 5: 完了
+  ================================================================= -->
+  <section id="step-5" class="hidden bg-white rounded-2xl shadow-sm border border-gray-100 p-5 text-center">
+    <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4 mt-2">
+      <svg class="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+      </svg>
+    </div>
+
+    <h2 class="text-xl font-bold text-gray-800 mb-2">設定完了</h2>
+    <p class="text-sm text-gray-500 leading-relaxed mb-6">
+      Leonardo Jr. の初期設定が完了しました。<br>
+      検知イベントが発生すると、設定した通知先にアラートが届きます。
+    </p>
+
+    <div class="bg-gray-50 rounded-xl px-4 py-3 mb-6 text-left border border-gray-100">
+      <p class="text-xs text-gray-400 mb-1">登録デバイス</p>
+      <p id="complete-device-id" class="text-sm font-mono font-bold text-gray-800"></p>
+    </div>
+
+    <a id="dashboard-link" href="https://dashboard.leonardo-jr.jp"
+       class="block w-full bg-blue-600 text-white rounded-xl py-3 text-sm font-semibold
+              hover:bg-blue-700 transition-all">
+      ダッシュボードを開く
+    </a>
+  </section>
+
+</main><!-- /main -->
+
+<!-- ===================================================================
+     JavaScript — 状態管理・API通信・UI制御
+=================================================================== -->
+<script>
+'use strict';
+
+// ===========================================================================
+// 設定
+// 本番デプロイ時は API_BASE を実際の API サーバー URL に変更すること
+// ===========================================================================
+const API_BASE = 'http://localhost:8000';  // 本番: https://api.leonardo-jr.jp
+
+// ===========================================================================
+// アプリケーション状態
+// ===========================================================================
+const state = {
+  deviceId:    null,   // URL パラメータから取得
+  fth:         null,   // URL パラメータから取得 (factory_token_hash)
+  accessToken: null,   // JWT アクセストークン
+  apiToken:    null,   // デバイス api_token（登録完了後に取得）
+  currentStep: 1,
+  gps: null,           // { lat: number, lon: number, accuracy: number }
+  map: null,           // Leaflet マップインスタンス
+  marker: null,        // Leaflet マーカーインスタンス
+};
+
+// ステップラベル（プログレスバー用）
+const STEP_LABELS = ['', 'ログイン', 'デバイス確認', 'セットアップ', '位置登録', '完了'];
+
+// ===========================================================================
+// 初期化（DOMContentLoaded）
+// ===========================================================================
+document.addEventListener('DOMContentLoaded', () => {
+  const params = new URLSearchParams(window.location.search);
+  state.deviceId = params.get('device_id');
+  state.fth      = params.get('fth');
+
+  // QR コードから必要なパラメータが揃っているか確認
+  if (!state.deviceId || !state.fth) {
+    showError(
+      'QR コードが正しく読み取れませんでした。' +
+      'もう一度デバイス本体の QR コードをスキャンしてください。'
+    );
+    document.getElementById('progress-area').classList.add('hidden');
+    return;
+  }
+
+  // device_id を各ステップの表示箇所に設定
+  document.getElementById('display-device-id').textContent = state.deviceId;
+  document.getElementById('complete-device-id').textContent = state.deviceId;
+
+  goToStep(1);
+});
+
+// ===========================================================================
+// ステップ遷移
+// ===========================================================================
+function goToStep(n) {
+  // 全セクションを非表示にしてから対象ステップだけ表示
+  for (let i = 1; i <= 5; i++) {
+    document.getElementById(`step-${i}`).classList.toggle('hidden', i !== n);
+  }
+  state.currentStep = n;
+
+  // プログレスバー更新
+  for (let i = 1; i <= 5; i++) {
+    const el = document.getElementById(`prog-${i}`);
+    el.classList.toggle('bg-blue-500', i <= n);
+    el.classList.toggle('bg-gray-200', i > n);
+  }
+  document.getElementById('step-label').textContent =
+    `${n} / 5 — ${STEP_LABELS[n]}`;
+
+  // Step 4 に遷移したら地図を初期化（表示状態でないとサイズ計算が狂う）
+  if (n === 4) {
+    // Leaflet は要素が visible になってから初期化する必要がある
+    setTimeout(initMap, 50);
+  }
+
+  // エラーバナーをクリア
+  hideError();
+  // ページ先頭にスクロール
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ===========================================================================
+// タブ切り替え（Step 1: ログイン / 新規登録）
+// ===========================================================================
+function switchTab(tab) {
+  const isLogin = tab === 'login';
+
+  document.getElementById('form-login').classList.toggle('hidden', !isLogin);
+  document.getElementById('form-register').classList.toggle('hidden', isLogin);
+
+  const activeClass   = 'flex-1 pb-2.5 text-sm font-semibold text-blue-600 border-b-2 border-blue-600 transition-colors';
+  const inactiveClass = 'flex-1 pb-2.5 text-sm font-semibold text-gray-400 border-b-2 border-transparent transition-colors';
+
+  document.getElementById('tab-login').className    = isLogin  ? activeClass : inactiveClass;
+  document.getElementById('tab-register').className = !isLogin ? activeClass : inactiveClass;
+}
+
+// ===========================================================================
+// エラー表示 / 非表示
+// ===========================================================================
+function showError(msg) {
+  const banner = document.getElementById('error-banner');
+  document.getElementById('error-text').textContent = msg;
+  banner.classList.remove('hidden');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function hideError() {
+  document.getElementById('error-banner').classList.add('hidden');
+}
+
+// ===========================================================================
+// ボタン ローディング状態制御
+// ===========================================================================
+function setLoading(btn, loading) {
+  if (!btn) return;
+  btn.disabled = loading;
+
+  if (loading) {
+    btn.dataset.originalText = btn.textContent;
+    btn.innerHTML = '<span class="spinner"></span>処理中…';
+  } else {
+    btn.textContent = btn.dataset.originalText ?? btn.textContent;
+  }
+}
+
+// ===========================================================================
+// API 通信ヘルパー
+// 401 / 403 / 409 / 422 / 500 系は全て Error として throw する
+// ===========================================================================
+async function apiFetch(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+
+  if (state.accessToken) {
+    headers['Authorization'] = `Bearer ${state.accessToken}`;
+  }
+
+  let resp;
+  try {
+    resp = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: { ...headers, ...(options.headers ?? {}) },
+    });
+  } catch (e) {
+    throw new Error('サーバーに接続できませんでした。ネットワークをご確認ください。');
+  }
+
+  let data = {};
+  try { data = await resp.json(); } catch (_) { /* 空レスポンス */ }
+
+  if (!resp.ok) {
+    // FastAPI の ValidationError は detail が配列になる
+    const detail = data.detail;
+    const msg = Array.isArray(detail)
+      ? detail.map(e => e.msg ?? e).join(' / ')
+      : (detail ?? `エラー ${resp.status}`);
+    throw new Error(msg);
+  }
+
+  return data;
+}
+
+// ===========================================================================
+// Step 1: ログイン
+// ===========================================================================
+async function handleLogin(btn) {
+  hideError();
+
+  const email    = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+
+  if (!email || !password) {
+    showError('メールアドレスとパスワードを入力してください');
+    return;
+  }
+
+  setLoading(btn, true);
+  try {
+    const data = await apiFetch('/api/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
+    state.accessToken = data.access_token;
+    goToStep(2);
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    setLoading(btn, false);
+  }
+}
+
+// ===========================================================================
+// Step 1: 新規登録
+// ===========================================================================
+async function handleRegister(btn) {
+  hideError();
+
+  const email    = document.getElementById('reg-email').value.trim();
+  const password = document.getElementById('reg-password').value;
+  const phone    = document.getElementById('reg-phone').value.trim();
+
+  if (!email || !password) {
+    showError('メールアドレスとパスワードを入力してください');
+    return;
+  }
+  if (password.length < 8) {
+    showError('パスワードは8文字以上で入力してください');
+    return;
+  }
+
+  const body = { email, password };
+  if (phone) body.phone_number = phone;
+
+  setLoading(btn, true);
+  try {
+    const data = await apiFetch('/api/v1/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    state.accessToken = data.access_token;
+    goToStep(2);
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    setLoading(btn, false);
+  }
+}
+
+// ===========================================================================
+// Step 2: デバイス登録
+// factory_token_hash (fth) を URL パラメータとして送る
+// レスポンスの api_token を state に保存（圏外ログアップロード等で使用）
+// ===========================================================================
+async function handleDeviceRegister(btn) {
+  hideError();
+  setLoading(btn, true);
+
+  try {
+    const path =
+      `/api/v1/devices/${encodeURIComponent(state.deviceId)}/register` +
+      `?fth=${encodeURIComponent(state.fth)}`;
+
+    const data = await apiFetch(path, { method: 'POST' });
+    state.apiToken = data.api_token;
+    goToStep(3);
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    setLoading(btn, false);
+  }
+}
+
+// ===========================================================================
+// Step 3: セットアップ（通知先・検知対象）
+// ===========================================================================
+async function handleSetup(btn) {
+  hideError();
+
+  const lineToken   = document.getElementById('line-token').value.trim();
+  const notifyEmail = document.getElementById('notify-email').value.trim();
+  const targets = ['bear', 'human', 'vehicle']
+    .filter(t => document.getElementById(`target-${t}`).checked);
+
+  // 通知先が何も設定されていない場合は確認
+  if (!lineToken && !notifyEmail) {
+    // 実証機では警告のみで続行を許可
+    if (!confirm('通知先が設定されていません。このまま続けますか？')) return;
+  }
+
+  // notification_target を構築
+  const notification = {};
+  if (lineToken)   notification.line_token = lineToken;
+  if (notifyEmail) notification.email = notifyEmail;
+
+  setLoading(btn, true);
+  try {
+    await apiFetch(`/api/v1/devices/${encodeURIComponent(state.deviceId)}/setup`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        notification_target: Object.keys(notification).length ? notification : null,
+        detection_targets:   targets.length ? targets : null,
+      }),
+    });
+    goToStep(4);
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    setLoading(btn, false);
+  }
+}
+
+// ===========================================================================
+// Step 4: 地図初期化（Leaflet + OpenStreetMap）
+// ===========================================================================
+function initMap() {
+  const container = document.getElementById('map');
+
+  if (state.map) {
+    // 既に初期化済みの場合はサイズだけ再計算（非表示 → 表示後のズレ対応）
+    state.map.invalidateSize();
+    return;
+  }
+
+  // 初期ビュー: 日本全体が見える中心点
+  state.map = L.map('map', { zoomControl: true }).setView([36.5, 137.8], 5);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    maxZoom: 19,
+  }).addTo(state.map);
+}
+
+// ===========================================================================
+// Step 4: GPS 取得
+// Geolocation API で現在地を取得し、地図にピンを立てる
+// accuracy に応じて色分けインジケーターを更新する
+// ===========================================================================
+function getLocation(btn) {
+  hideError();
+
+  if (!navigator.geolocation) {
+    showError('このブラウザまたはデバイスは GPS に対応していません');
+    return;
+  }
+
+  setLoading(btn, true);
+
+  navigator.geolocation.getCurrentPosition(
+    // 成功コールバック
+    (pos) => {
+      const { latitude: lat, longitude: lon, accuracy } = pos.coords;
+      state.gps = { lat, lon, accuracy };
+
+      // 地図を現在地に移動してピンを立てる
+      state.map.setView([lat, lon], 15);
+      if (state.marker) state.map.removeLayer(state.marker);
+      state.marker = L.marker([lat, lon])
+        .addTo(state.map)
+        .bindPopup(`設置場所<br>精度: ±${Math.round(accuracy)}m`)
+        .openPopup();
+
+      // accuracy インジケーター更新
+      updateAccuracyUI(accuracy);
+
+      // 登録ボタンを有効化
+      document.getElementById('btn-register-location').disabled = false;
+
+      setLoading(btn, false);
+      btn.textContent = '現在地を再取得';
+    },
+
+    // エラーコールバック
+    (err) => {
+      const messages = {
+        1: 'GPS へのアクセスが拒否されました。ブラウザの設定で位置情報を許可してから再度お試しください。',
+        2: '現在地を取得できませんでした。屋外や窓際でお試しください。',
+        3: 'GPS の取得がタイムアウトしました。もう一度お試しください。',
+      };
+      showError(messages[err.code] ?? `GPS エラー (code=${err.code})`);
+      setLoading(btn, false);
+    },
+
+    // オプション
+    {
+      enableHighAccuracy: true,  // 高精度モード（スマホのGPS使用）
+      timeout: 30000,            // 30 秒でタイムアウト
+      maximumAge: 0,             // キャッシュを使わず常に最新を取得
+    }
+  );
+}
+
+// ===========================================================================
+// accuracy インジケーター更新
+// 50m 以下: 緑 / 50〜100m: 黄 / 100m 超: 赤
+// ===========================================================================
+function updateAccuracyUI(accuracy) {
+  const card    = document.getElementById('accuracy-card');
+  const badge   = document.getElementById('accuracy-badge');
+  const title   = document.getElementById('accuracy-title');
+  const detail  = document.getElementById('accuracy-detail');
+  const warning = document.getElementById('accuracy-warning');
+
+  const acc = Math.round(accuracy);
+  card.classList.remove('hidden');
+  detail.textContent = `緯度: ${state.gps.lat.toFixed(6)}  経度: ${state.gps.lon.toFixed(6)}  精度: ±${acc}m`;
+
+  if (accuracy <= 50) {
+    // 良好
+    card.className  = 'rounded-xl px-4 py-3 mb-3 border bg-green-50 border-green-200 transition-all';
+    badge.className = 'mt-0.5 inline-block w-2.5 h-2.5 rounded-full flex-shrink-0 mt-1 bg-green-500';
+    title.className = 'text-sm font-semibold text-green-700';
+    title.textContent = `GPS 精度: 良好（±${acc}m）`;
+    warning.classList.add('hidden');
+
+  } else if (accuracy <= 100) {
+    // やや低い（登録可能だが警告）
+    card.className  = 'rounded-xl px-4 py-3 mb-3 border bg-yellow-50 border-yellow-200 transition-all';
+    badge.className = 'mt-0.5 inline-block w-2.5 h-2.5 rounded-full flex-shrink-0 mt-1 bg-yellow-400';
+    title.className = 'text-sm font-semibold text-yellow-700';
+    title.textContent = `GPS 精度: やや低め（±${acc}m）`;
+    warning.textContent =
+      `GPS 精度が ${acc}m です。50m 以下での登録を推奨します。` +
+      `このまま登録することも可能です。`;
+    warning.classList.remove('hidden');
+
+  } else {
+    // 低い（登録は可能。実証機では拒否しない。山間部テスト対応）
+    card.className  = 'rounded-xl px-4 py-3 mb-3 border bg-red-50 border-red-200 transition-all';
+    badge.className = 'mt-0.5 inline-block w-2.5 h-2.5 rounded-full flex-shrink-0 mt-1 bg-red-500';
+    title.className = 'text-sm font-semibold text-red-700';
+    title.textContent = `GPS 精度: 低い（±${acc}m）`;
+    warning.textContent =
+      `GPS 精度が低い状態です（±${acc}m）。` +
+      `可能であれば屋外や開けた場所で再取得してください。` +
+      `このまま登録することも可能です。`;
+    warning.classList.remove('hidden');
+  }
+}
+
+// ===========================================================================
+// Step 4: 位置登録
+// active_flag 制御はサーバー側（同一トランザクション内）で行う
+// ===========================================================================
+async function handleLocationRegister(btn) {
+  hideError();
+
+  if (!state.gps) {
+    showError('先に現在地を取得してください');
+    return;
+  }
+
+  setLoading(btn, true);
+  try {
+    const data = await apiFetch(
+      `/api/v1/devices/${encodeURIComponent(state.deviceId)}/location`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          lat:      state.gps.lat,
+          lon:      state.gps.lon,
+          accuracy: state.gps.accuracy,
+        }),
+      }
+    );
+
+    // API からの警告はコンソールのみ（実証機では拒否しない）
+    if (data.warning) {
+      console.info('[位置登録] warning:', data.warning);
+    }
+
+    goToStep(5);
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    setLoading(btn, false);
+  }
+}
+</script>
+
+</body>
+</html>

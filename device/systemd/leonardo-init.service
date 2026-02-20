@@ -1,0 +1,24 @@
+[Unit]
+Description=Leonardo Jr. Device Initialization
+Documentation=https://github.com/japan-renaissance-partners/leonardo-jr
+# ネットワーク到達確認は不要（pre-register しないため）
+After=local-fs.target
+# 他の Leonardo サービスより先に起動を保証
+Before=leonardo-detector.service
+
+[Service]
+Type=oneshot
+# 初期化スクリプトを実行
+ExecStart=/usr/bin/python3 /opt/leonardo/scripts/init_device.py
+# サービス完了後も「active」状態を維持し、依存サービスの After= に使える
+RemainAfterExit=yes
+# 標準出力・エラーをジャーナルへ
+StandardOutput=journal
+StandardError=journal
+# /etc/leonardo/ への書き込み権限を確保
+UMask=0022
+# 失敗時のリトライは行わない（失敗したら管理者が確認するべき）
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
