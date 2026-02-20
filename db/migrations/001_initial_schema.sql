@@ -134,6 +134,11 @@ CREATE INDEX idx_location_device_time ON location_history(device_id, registered_
 CREATE INDEX idx_location_active ON location_history(device_id)
     WHERE active_flag = TRUE;
 
+-- 1デバイスにつきアクティブ座標は必ず1件のみであることを DB レベルで保証する
+-- UPDATE active_flag=FALSE → INSERT active_flag=TRUE の順に同一トランザクション内で実行すること（仕様 §6.3）
+CREATE UNIQUE INDEX idx_one_active_per_device
+    ON location_history(device_id) WHERE active_flag = TRUE;
+
 
 -- ===========================================================================
 -- 4. detection_events

@@ -26,6 +26,17 @@ import generate_qr as qr_mod
 
 
 # ─────────────────────────────────────────────
+# 共通フィクスチャ
+# ─────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _factory_secret(monkeypatch):
+    """generate_qr.py が os.environ["FACTORY_SECRET"] を参照するため、テスト実行前に設定する。"""
+    monkeypatch.setenv("FACTORY_SECRET", "LEONARDO_JR_2026_SECRET")
+
+
+# ─────────────────────────────────────────────
 # generate_device_id.py のテスト
 # ─────────────────────────────────────────────
 
@@ -44,23 +55,26 @@ class TestGetCpuSerial:
         assert len(result) == 8
 
     def test_fallback_on_missing_file(self, tmp_path):
-        """存在しないファイルを指定した場合は DEVDUMMY を返す"""
+        """存在しないファイルを指定した場合は DEVDUMMY + 4桁サフィックスを返す"""
         result = did_mod.get_cpu_serial(tmp_path / "nonexistent")
-        assert result == "DEVDUMMY"
+        assert result.startswith("DEVDUMMY")
+        assert len(result) == 12  # "DEVDUMMY"(8) + 4桁乱数
 
     def test_fallback_on_no_serial_line(self, tmp_path):
-        """Serial 行がない cpuinfo の場合は DEVDUMMY を返す"""
+        """Serial 行がない cpuinfo の場合は DEVDUMMY + 4桁サフィックスを返す"""
         cpuinfo = tmp_path / "cpuinfo"
         cpuinfo.write_text("Processor\t: ARMv7\nBogoMIPS\t: 38.40\n")
         result = did_mod.get_cpu_serial(cpuinfo)
-        assert result == "DEVDUMMY"
+        assert result.startswith("DEVDUMMY")
+        assert len(result) == 12
 
     def test_short_serial_fallback(self, tmp_path):
-        """Serial が 8 桁未満の場合は DEVDUMMY を返す"""
+        """Serial が 8 桁未満の場合は DEVDUMMY + 4桁サフィックスを返す"""
         cpuinfo = tmp_path / "cpuinfo"
         cpuinfo.write_text("Serial\t\t: 1234\n")
         result = did_mod.get_cpu_serial(cpuinfo)
-        assert result == "DEVDUMMY"
+        assert result.startswith("DEVDUMMY")
+        assert len(result) == 12
 
 
 class TestGenerateRandom4:

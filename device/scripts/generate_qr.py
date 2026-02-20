@@ -23,6 +23,7 @@ QRコード生成スクリプト
 """
 
 import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -44,18 +45,18 @@ DEFAULT_QR_PATH = Path("/etc/leonardo/qr_setup.png")
 # セットアップ画面のベースURL
 SETUP_BASE_URL = "https://setup.leonardo-jr.jp/register"
 
-# 実証機用固定シークレット（量産機ではワンタイムチャレンジに移行）
-FACTORY_SECRET = "LEONARDO_JR_2026_SECRET"
-
-
 def derive_factory_token(device_id: str) -> str:
     """
-    device_id と固定シークレットから factory_token を導出する。
+    device_id と環境変数 FACTORY_SECRET から factory_token を導出する。
 
     この値はデバイス内部でのみ使用し、外部（URL・ログ等）には出さない。
     サーバ側も同じ計算式で factory_token を再導出し、そのハッシュと照合する。
+
+    Raises:
+        KeyError: 環境変数 FACTORY_SECRET が未設定の場合
     """
-    raw = f"{device_id}:{FACTORY_SECRET}".encode()
+    secret = os.environ["FACTORY_SECRET"]
+    raw = f"{device_id}:{secret}".encode()
     return hashlib.sha256(raw).hexdigest()[:16]
 
 

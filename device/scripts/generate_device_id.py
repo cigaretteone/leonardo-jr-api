@@ -16,7 +16,7 @@ device_id 生成スクリプト
 依存: 標準ライブラリのみ
 """
 
-import random
+import secrets
 import string
 import sys
 from pathlib import Path
@@ -45,17 +45,19 @@ def get_cpu_serial(cpuinfo_path: Path = DEFAULT_CPUINFO_PATH) -> str:
         pass
 
     # Raspberry Pi 以外の環境ではダミー値を使用
+    # 同一ネット内の複数台衝突を避けるため、4桁ランダムサフィックスを付与する
     print(
         "Warning: CPUシリアル取得不可。開発環境用ダミー値を使用します。",
         file=sys.stderr,
     )
-    return "DEVDUMMY"
+    charset = string.ascii_uppercase + string.digits
+    return "DEVDUMMY" + "".join(secrets.choice(charset) for _ in range(4))
 
 
 def generate_random_4() -> str:
-    """4桁の英大文字+数字の乱数文字列を生成する。"""
+    """4桁の英大文字+数字の乱数文字列を生成する（暗号論的乱数）。"""
     charset = string.ascii_uppercase + string.digits
-    return "".join(random.choices(charset, k=4))
+    return "".join(secrets.choice(charset) for _ in range(4))
 
 
 def generate_device_id(

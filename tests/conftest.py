@@ -28,6 +28,17 @@ from leonardo_api.database import Base, get_db
 from leonardo_api.main import app
 
 # ---------------------------------------------------------------------------
+# デバイス側 generate_qr.py が os.environ["FACTORY_SECRET"] を参照するため、
+# テスト実行時に設定する（サーバ側は settings.FACTORY_SECRET を使用）
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _factory_secret(monkeypatch):
+    """FACTORY_SECRET をテスト用固定値で設定する。全テストに自動適用。"""
+    monkeypatch.setenv("FACTORY_SECRET", "LEONARDO_JR_2026_SECRET")
+
+
+# ---------------------------------------------------------------------------
 # 結合テスト用 DB 接続 URL
 # 環境変数が未設定の場合、integration テストはスキップされる
 # ---------------------------------------------------------------------------
