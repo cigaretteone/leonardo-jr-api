@@ -10,6 +10,7 @@ import secrets
 import uuid
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -61,35 +62,50 @@ async def register_device(
 
     - devices レコードが存在しない → その場で作成（pre-register なし）
     - 存在 + owner_user_id IS NULL → 登録可能
-    - 存在 + owner 設定済み → 呼び出し元で 409 を返すこと
+    - 存在 + owner 設定済み → ValueError を送出（呼び出し元で 409 を返すこと）
 
     Returns:
         登録済みの Device オブジェクト（api_token が設定されている）
+
+    Raises:
+        ValueError: デバイスに既に owner_user_id が設定されている場合
+        IntegrityError: DB 制約違反（同時登録競合等）が発生した場合
     """
     result = await db.execute(select(Device).where(Device.device_id == device_id))
     device = result.scalar_one_or_none()
 
+    # サービス層の二重チェック: ルーター側チェック後に競合が生じた場合のセーフガード
+    if device is not None and device.owner_user_id is not None:
+        raise ValueError(
+            f"デバイス {device_id} はすでに登録済みです（owner_user_id IS NOT NULL）。"
+        )
+
     api_token = _generate_api_token()
     fth = _compute_factory_token_hash(device_id)
 
-    if device is None:
-        # devices レコードをこの時点で新規作成
-        device = Device(
-            device_id=device_id,
-            factory_token_hash=fth,
-            owner_user_id=owner_user_id,
-            api_token=api_token,
-            status="active",
-            plan_type="consumer",
-        )
-        db.add(device)
-    else:
-        # 既存レコードに owner と api_token を設定
-        device.owner_user_id = owner_user_id
-        device.api_token = api_token
+    try:
+        if device is None:
+            # devices レコードをこの時点で新規作成
+            device = Device(
+                device_id=device_id,
+                factory_token_hash=fth,
+                owner_user_id=owner_user_id,
+                api_token=api_token,
+                status="active",
+                plan_type="consumer",
+            )
+            db.add(device)
+        else:
+            # 既存レコードに owner と api_token を設定
+            device.owner_user_id = owner_user_id
+            device.api_token = api_token
 
-    await db.commit()
-    await db.refresh(device)
+        await db.commit()
+        await db.refresh(device)
+    except IntegrityError:
+        await db.rollback()
+        raise
+
     return device
 
 

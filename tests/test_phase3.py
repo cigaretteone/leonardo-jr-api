@@ -23,6 +23,53 @@ import pytest
 # services/device_service.py のテスト
 # =============================================================================
 
+class TestRegisterDeviceService:
+    """register_device() サービス関数の単体テスト"""
+
+    @pytest.mark.asyncio
+    async def test_raises_value_error_when_owner_already_set(self):
+        """owner_user_id が設定済みのデバイスに register_device() を呼ぶと ValueError が発生すること"""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leonardo_api.models import Device
+        from leonardo_api.services.device_service import register_device
+
+        mock_db = AsyncMock()
+        existing_device = MagicMock(spec=Device)
+        existing_device.owner_user_id = uuid.uuid4()  # 既に owner あり
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = existing_device
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        with pytest.raises(ValueError, match="登録済み"):
+            await register_device(mock_db, "LJ-TEST0000-0001", uuid.uuid4())
+
+    @pytest.mark.asyncio
+    async def test_allows_registration_when_owner_is_none(self):
+        """owner_user_id が None のデバイスは登録可能であること"""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leonardo_api.models import Device
+        from leonardo_api.services.device_service import register_device
+
+        mock_db = AsyncMock()
+        existing_device = MagicMock(spec=Device)
+        existing_device.owner_user_id = None  # 未登録状態
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = existing_device
+        mock_db.execute = AsyncMock(return_value=mock_result)
+        mock_db.commit = AsyncMock()
+        mock_db.refresh = AsyncMock()
+
+        # ValueError が発生しないことを確認（IntegrityError 等の別例外は除く）
+        try:
+            await register_device(mock_db, "LJ-TEST0000-0002", uuid.uuid4())
+        except ValueError:
+            pytest.fail("owner_user_id が None の場合は ValueError を送出してはいけません")
+
+
 class TestFactoryTokenVerification:
     """verify_factory_token_hash() のテスト"""
 
