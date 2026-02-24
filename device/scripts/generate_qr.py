@@ -4,22 +4,22 @@
 
 QRコード生成スクリプト
 
-処理:
-  1. device_id 読み込み（/etc/leonardo/device_id）
-  2. factory_token 生成  → デバイス内部保持のみ、外部に出さない
-  3. factory_token_hash 生成 → QRに埋め込む値
-  4. URL組み立て:
-       https://setup.leonardo-jr.jp/register?device_id={device_id}&fth={factory_token_hash}
-     ※ factory_token 自体は URL に含めない（ブラウザ履歴・リファラ・サーバログに残るため）
-  5. QRコード画像を /etc/leonardo/qr_setup.png に保存
-  6. コンソールに ASCII QR を出力（開発・現場確認用）
+処琁E
+  1. device_id 読み込み�E�Eetc/leonardo/device_id�E�E
+  2. factory_token 生�E  ↁEチE��イス冁E��保持のみ、外部に出さなぁE
+  3. factory_token_hash 生�E ↁEQRに埋め込む値
+  4. URL絁E��立て:
+       https://leonardo-jr-api.onrender.com/setup?device_id={device_id}&fth={factory_token_hash}
+     ※ factory_token 自体�E URL に含めなぁE��ブラウザ履歴・リファラ・サーバログに残るため�E�E
+  5. QRコード画像を /etc/leonardo/qr_setup.png に保孁E
+  6. コンソールに ASCII QR を�E力（開発・現場確認用�E�E
 
-依存: pip install qrcode[pil]
+依孁E pip install qrcode[pil]
 
-セキュリティ注意:
-  - FACTORY_SECRET は実証機用固定値。量産機ではワンタイムチャレンジ方式に移行（v1.2）。
-  - factory_token は derive して即使用し、ファイルに保存しない。
-  - サーバ側には factory_token_hash を保存し、QR の fth パラメータと照合する。
+セキュリチE��注愁E
+  - FACTORY_SECRET は実証機用固定値。量産機ではワンタイムチャレンジ方式に移行！E1.2�E�、E
+  - factory_token は derive して即使用し、ファイルに保存しなぁE��E
+  - サーバ�Eには factory_token_hash を保存し、QR の fth パラメータと照合する、E
 """
 
 import hashlib
@@ -39,21 +39,21 @@ except ImportError:
 
 from generate_device_id import DEFAULT_DEVICE_ID_PATH
 
-# QR画像の保存先（デフォルト）
+# QR画像�E保存�E�E�デフォルト！E
 DEFAULT_QR_PATH = Path("/etc/leonardo/qr_setup.png")
 
-# セットアップ画面のベースURL
-SETUP_BASE_URL = "https://setup.leonardo-jr.jp/register"
+# セチE��アチE�E画面のベ�EスURL
+SETUP_BASE_URL = "https://leonardo-jr-api.onrender.com/setup"
 
 def derive_factory_token(device_id: str) -> str:
     """
-    device_id と環境変数 FACTORY_SECRET から factory_token を導出する。
+    device_id と環墁E��数 FACTORY_SECRET から factory_token を導�Eする、E
 
-    この値はデバイス内部でのみ使用し、外部（URL・ログ等）には出さない。
-    サーバ側も同じ計算式で factory_token を再導出し、そのハッシュと照合する。
+    こ�E値はチE��イス冁E��でのみ使用し、外部�E�ERL・ログ等）には出さなぁE��E
+    サーバ�Eも同じ計算式で factory_token を�E導�Eし、そのハッシュと照合する、E
 
     Raises:
-        KeyError: 環境変数 FACTORY_SECRET が未設定の場合
+        KeyError: 環墁E��数 FACTORY_SECRET が未設定�E場吁E
     """
     secret = os.environ["FACTORY_SECRET"]
     raw = f"{device_id}:{secret}".encode()
@@ -62,20 +62,20 @@ def derive_factory_token(device_id: str) -> str:
 
 def derive_factory_token_hash(factory_token: str) -> str:
     """
-    factory_token をさらにハッシュ化して factory_token_hash を導出する。
+    factory_token をさらにハッシュ化して factory_token_hash を導�Eする、E
 
-    この値のみ QR コードの URL パラメータ (fth) として公開する。
-    サーバ側では保存済みの factory_token_hash と QR の fth を比較照合する。
+    こ�E値のみ QR コード�E URL パラメータ (fth) として公開する、E
+    サーバ�Eでは保存済みの factory_token_hash と QR の fth を比輁E�E合する、E
     """
     return hashlib.sha256(factory_token.encode()).hexdigest()[:16]
 
 
 def build_setup_url(device_id: str) -> str:
     """
-    QR コードに埋め込むセットアップ URL を組み立てる。
+    QR コードに埋め込むセチE��アチE�E URL を絁E��立てる、E
 
-    URL には factory_token_hash (fth) のみ含む。
-    factory_token（平文）は URL に含めない。
+    URL には factory_token_hash (fth) のみ含む、E
+    factory_token�E�平斁E���E URL に含めなぁE��E
     """
     factory_token = derive_factory_token(device_id)
     fth = derive_factory_token_hash(factory_token)
@@ -88,21 +88,21 @@ def generate_qr(
     print_ascii: bool = True,
 ) -> str:
     """
-    QR コードを生成して PNG に保存する。
+    QR コードを生�Eして PNG に保存する、E
 
     Args:
-        device_id:   対象デバイスの device_id
-        output_path: QR 画像の保存先（デフォルト: /etc/leonardo/qr_setup.png）
-        print_ascii: True の場合、コンソールに ASCII QR を出力する
+        device_id:   対象チE��イスの device_id
+        output_path: QR 画像�E保存�E�E�デフォルチE /etc/leonardo/qr_setup.png�E�E
+        print_ascii: True の場合、コンソールに ASCII QR を�E力すめE
 
     Returns:
-        セットアップ URL 文字列
+        セチE��アチE�E URL 斁E���E
     """
     url = build_setup_url(device_id)
 
-    # QR コードオブジェクト生成
+    # QR コードオブジェクト生戁E
     qr = qrcode.QRCode(
-        version=None,  # データ量に応じて自動サイズ決定
+        version=None,  # チE�Eタ量に応じて自動サイズ決宁E
         error_correction=qrcode.constants.ERROR_CORRECT_M,  # ~15% 誤り訂正
         box_size=10,
         border=4,
@@ -110,17 +110,17 @@ def generate_qr(
     qr.add_data(url)
     qr.make(fit=True)
 
-    # PNG 保存
+    # PNG 保孁E
     output_path.parent.mkdir(parents=True, exist_ok=True)
     img = qr.make_image(fill_color="black", back_color="white")
     img.save(str(output_path))
 
-    # ASCII QR 出力（開発・現場確認用）
+    # ASCII QR 出力（開発・現場確認用�E�E
     if print_ascii:
         print("\n--- ASCII QR (開発確認用) ---")
         qr.print_ascii(invert=True)
         print(f"\nSetup URL : {url}")
-        print(f"QR 保存先 : {output_path}")
+        print(f"QR 保存�E : {output_path}")
 
     return url
 
@@ -130,7 +130,7 @@ def main() -> None:
 
     if not device_id_path.exists():
         print(
-            "Error: device_id が見つかりません。先に generate_device_id.py を実行してください。",
+            "Error: device_id が見つかりません。�Eに generate_device_id.py を実行してください、E,
             file=sys.stderr,
         )
         sys.exit(1)
