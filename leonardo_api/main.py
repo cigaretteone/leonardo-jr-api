@@ -1,4 +1,4 @@
-"""
+﻿"""
 main.py — FastAPI アプリケーションエントリーポイント
 
 起動方法:
@@ -22,7 +22,7 @@ _WEB_DIR = pathlib.Path(__file__).parent.parent / "web"
 
 app = FastAPI(
     title="Leonardo Jr. API",
-    description="ALSOK・自治体向けデモ機 QR初期設定 + 検知イベント受信 API（実証機版）",
+    description="Leonardo Jr. QR初期設定 + 検知イベント受信 API（実証機版）",
     version="0.1.0",
 )
 
@@ -65,3 +65,4 @@ async def serve_setup() -> FileResponse:
 # web/ 配下のその他静的アセット（将来の画像・CSS追加に備える）
 if _WEB_DIR.exists():
     app.mount("/web", StaticFiles(directory=str(_WEB_DIR)), name="web")
+
