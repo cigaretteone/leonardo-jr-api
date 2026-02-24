@@ -9,7 +9,7 @@ QRコード生成スクリプト
   2. factory_token 生成  → デバイス内部保持のみ、外部に出さない
   3. factory_token_hash 生成 → QRに埋め込む値
   4. URL組み立て:
-       https://setup.leonardo-jr.jp/register?device_id={device_id}&fth={factory_token_hash}
+       https://leonardo-jr-api.onrender.com/setup?device_id={device_id}&fth={factory_token_hash}
      ※ factory_token 自体は URL に含めない（ブラウザ履歴・リファラ・サーバログに残るため）
   5. QRコード画像を /etc/leonardo/qr_setup.png に保存
   6. コンソールに ASCII QR を出力（開発・現場確認用）
@@ -43,7 +43,7 @@ from generate_device_id import DEFAULT_DEVICE_ID_PATH
 DEFAULT_QR_PATH = Path("/etc/leonardo/qr_setup.png")
 
 # セットアップ画面のベースURL
-SETUP_BASE_URL = "https://setup.leonardo-jr.jp/register"
+SETUP_BASE_URL = "https://leonardo-jr-api.onrender.com/setup"
 
 def derive_factory_token(device_id: str) -> str:
     """
