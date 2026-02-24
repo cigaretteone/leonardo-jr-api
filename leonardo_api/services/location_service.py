@@ -1,7 +1,7 @@
-"""
-services/location_service.py — 位置登録ロジック
+﻿"""
+services/location_service.py — 設置登録ロジック
 
-active_flag 制御は同一トランザクション内で実行する（設計書 §6.3）。
+active_flag 制御は同一トランザクション内で実行する（設計書 §6.3）
 """
 
 import uuid
@@ -17,11 +17,11 @@ _ACCURACY_ALERT_M = 100.0  # 100m 超で追加警告（拒否はしない）
 
 
 def _build_accuracy_warning(accuracy: float | None) -> str | None:
-    """accuracy に応じた警告メッセージを返す（警告不要なら None）。"""
+    """accuracy に応じた警告メッセージを返す（警告不要なら None）"""
     if accuracy is None:
         return None
     if accuracy > _ACCURACY_ALERT_M:
-        return f"GPS 精度が低い状態です（{accuracy:.0f}m）。より精度の高い場所で再取得することを推奨します。"
+        return f"GPS 精度が低いです（{accuracy:.0f}m）。より精度の高い場所で再取得することを推奨します。"
     if accuracy > _ACCURACY_WARN_M:
         return f"GPS 精度が {accuracy:.0f}m です。50m 以下での登録を推奨します。"
     return None
@@ -48,30 +48,32 @@ async def register_location(
     """
     warning = _build_accuracy_warning(accuracy)
 
-    async with db.begin():
-        # 既存のアクティブ座標を無効化（履歴として保持）
-        await db.execute(
-            update(LocationHistory)
-            .where(
-                LocationHistory.device_id == device_id,
-                LocationHistory.active_flag.is_(True),
-            )
-            .values(active_flag=False)
+    # 既存のアクティブ座標を無効化（履歴として保持）
+    await db.execute(
+        update(LocationHistory)
+        .where(
+            LocationHistory.device_id == device_id,
+            LocationHistory.active_flag.is_(True),
         )
+        .values(active_flag=False)
+    )
 
-        # 新規座標を挿入
-        new_location = LocationHistory(
-            device_id=device_id,
-            lat=lat,
-            lon=lon,
-            accuracy=accuracy,
-            registered_by=user_id,
-            active_flag=True,
-            ip_address=ip_address,
-        )
-        db.add(new_location)
-
+    # 新規座標を挿入
+    new_location = LocationHistory(
+        device_id=device_id,
+        lat=lat,
+        lon=lon,
+        accuracy=accuracy,
+        registered_by=user_id,
+        active_flag=True,
+        ip_address=ip_address,
+    )
+    db.add(new_location)
+    
+    # 呼び出し元のトランザクションで commit する
+    await db.commit()
     await db.refresh(new_location)
+    
     return new_location, warning
 
 
