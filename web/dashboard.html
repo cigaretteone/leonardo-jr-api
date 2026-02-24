@@ -1,0 +1,64 @@
+﻿<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Leonardo Jr. Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>#map { height: 400px; }</style>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="max-w-4xl mx-auto p-6">
+        <header class="flex justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-800">Leonardo Jr. <span class="text-sm font-normal text-gray-500">Dashboard (Beta)</span></h1>
+            <span class="bg-green-100 text-green-800 text-xs font-semibold px-2.5 py-0.5 rounded">System Online</span>
+        </header>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="bg-white p-6 rounded-lg shadow col-span-1">
+                <h2 class="text-xl font-bold mb-4">Device Status</h2>
+                <div class="space-y-4">
+                    <div>
+                        <p class="text-sm text-gray-500">Device ID</p>
+                        <p class="font-mono font-bold text-lg">LJ-671493E4-QDSF</p>
+                    </div>
+                    <div>
+                        <p class="text-sm text-gray-500">Status</p>
+                        <div class="flex items-center mt-1">
+                            <span class="w-3 h-3 bg-green-500 rounded-full mr-2 animate-pulse"></span>
+                            <span class="font-bold text-gray-700">Active</span>
+                        </div>
+                    </div>
+                    <div>
+                        <p class="text-sm text-gray-500">Last Update</p>
+                        <p class="text-gray-700">Just now</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white p-6 rounded-lg shadow col-span-2">
+                <h2 class="text-xl font-bold mb-4">Current Location</h2>
+                <div id="map" class="rounded border"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 地図の初期化（東京・新宿付近）
+        // 本来はAPIから取得しますが、デモ用に先ほど登録した座標を表示します
+        const lat = 35.6895;
+        const lon = 139.6917;
+
+        const map = L.map('map').setView([lat, lon], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        L.marker([lat, lon]).addTo(map)
+            .bindPopup('<b>Leonardo Jr. Unit 01</b><br>稼働中')
+            .openPopup();
+    </script>
+</body>
+</html>
