@@ -1,64 +1,380 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Leonardo Jr. Dashboard</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <style>#map { height: 400px; }</style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Leonardo Jr. Device Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --surface: #111827;
+    --surface2: #1a2236;
+    --border: #1e2d45;
+    --accent: #22d3ee;
+    --accent2: #06b6d4;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --text: #e2e8f0;
+    --text2: #94a3b8;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'DM Sans', sans-serif;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .header {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 1.2rem 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    backdrop-filter: blur(12px);
+  }
+  .header h1 {
+    font-family: var(--mono);
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: -0.02em;
+  }
+  .header h1 span { color: var(--text2); font-weight: 400; }
+  .status-bar {
+    display: flex;
+    gap: 1.5rem;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--text2);
+  }
+  .status-dot {
+    width: 8px; height: 8px;
+    background: var(--green);
+    border-radius: 50%;
+    display: inline-block;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+    padding: 1.5rem 2rem;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem;
+  }
+  .stat-card .label {
+    font-size: 0.75rem;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-family: var(--mono);
+  }
+  .stat-card .value {
+    font-size: 1.8rem;
+    font-weight: 700;
+    font-family: var(--mono);
+    margin-top: 0.3rem;
+  }
+  .content {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 2rem 2rem;
+  }
+  .section-title {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 1.5rem 0 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  #map {
+    width: 100%;
+    height: 350px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+  }
+  .device-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .card:hover { border-color: var(--accent2); transform: translateY(-2px); }
+  .card-body { padding: 1.2rem; }
+  .card-body .device {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    color: var(--accent);
+    font-weight: 700;
+    margin-bottom: 0.8rem;
+  }
+  .info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid rgba(30,45,69,0.5);
+    font-family: var(--mono);
+    font-size: 0.78rem;
+  }
+  .info-row:last-child { border-bottom: none; }
+  .info-row .key { color: var(--text2); }
+  .info-row .val { color: var(--text); font-weight: 600; }
+  .badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 0.72rem;
+    font-family: var(--mono);
+  }
+  .badge-active { background: rgba(52,211,153,0.15); color: var(--green); }
+  .badge-suspended { background: rgba(248,113,113,0.15); color: var(--red); }
+  .link-bar {
+    display: flex;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+    margin-bottom: 1.5rem;
+  }
+  .link-btn {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--accent);
+    text-decoration: none;
+    padding: 0.5rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .link-btn:hover { border-color: var(--accent); background: rgba(34,211,238,0.1); }
+  .link-btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  .link-btn.primary:hover { background: var(--accent2); }
+  .target-tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    background: rgba(34,211,238,0.1);
+    color: var(--accent);
+    border: 1px solid rgba(34,211,238,0.2);
+    margin: 0.1rem;
+  }
+  .empty {
+    text-align: center;
+    padding: 4rem 2rem;
+    color: var(--text2);
+    font-family: var(--mono);
+  }
+  .empty .icon { font-size: 3rem; margin-bottom: 1rem; }
+  @media (max-width: 640px) {
+    .header { padding: 1rem; flex-direction: column; gap: 0.5rem; }
+    .stats, .content { padding-left: 1rem; padding-right: 1rem; }
+    .device-grid { grid-template-columns: 1fr; }
+    #map { height: 250px; }
+  }
+</style>
 </head>
-<body class="bg-gray-100 font-sans">
-    <div class="max-w-4xl mx-auto p-6">
-        <header class="flex justify-between items-center mb-8">
-            <h1 class="text-3xl font-bold text-gray-800">Leonardo Jr. <span class="text-sm font-normal text-gray-500">Dashboard (Beta)</span></h1>
-            <span class="bg-green-100 text-green-800 text-xs font-semibold px-2.5 py-0.5 rounded">System Online</span>
-        </header>
+<body>
 
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div class="bg-white p-6 rounded-lg shadow col-span-1">
-                <h2 class="text-xl font-bold mb-4">Device Status</h2>
-                <div class="space-y-4">
-                    <div>
-                        <p class="text-sm text-gray-500">Device ID</p>
-                        <p class="font-mono font-bold text-lg">LJ-671493E4-QDSF</p>
-                    </div>
-                    <div>
-                        <p class="text-sm text-gray-500">Status</p>
-                        <div class="flex items-center mt-1">
-                            <span class="w-3 h-3 bg-green-500 rounded-full mr-2 animate-pulse"></span>
-                            <span class="font-bold text-gray-700">Active</span>
-                        </div>
-                    </div>
-                    <div>
-                        <p class="text-sm text-gray-500">Last Update</p>
-                        <p class="text-gray-700">Just now</p>
-                    </div>
-                </div>
-            </div>
+<div class="header">
+  <h1>LEONARDO JR. <span>// DEVICE MANAGER</span></h1>
+  <div class="status-bar">
+    <span><span class="status-dot"></span> API ONLINE</span>
+    <span id="clock"></span>
+  </div>
+</div>
 
-            <div class="bg-white p-6 rounded-lg shadow col-span-2">
-                <h2 class="text-xl font-bold mb-4">Current Location</h2>
-                <div id="map" class="rounded border"></div>
-            </div>
-        </div>
-    </div>
+<div class="stats" id="stats">
+  <div class="stat-card">
+    <div class="label">Device ID</div>
+    <div class="value" style="color:var(--accent);font-size:1rem" id="stat-device">---</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Status</div>
+    <div class="value" style="color:var(--green)" id="stat-status">---</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Plan</div>
+    <div class="value" style="color:var(--amber);font-size:1.1rem" id="stat-plan">---</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Location</div>
+    <div class="value" style="color:var(--text);font-size:0.9rem" id="stat-location">---</div>
+  </div>
+</div>
 
-    <script>
-        // 地図の初期化（東京・新宿付近）
-        // 本来はAPIから取得しますが、デモ用に先ほど登録した座標を表示します
-        const lat = 35.6895;
-        const lon = 139.6917;
+<div class="content">
+  <div class="link-bar">
+    <a href="https://leonardo-receiver.onrender.com/dashboard" class="link-btn primary" target="_blank">EVENT VIEWER &rarr;</a>
+    <a href="/docs" class="link-btn" target="_blank">API DOCS</a>
+    <a href="/health" class="link-btn">HEALTH CHECK</a>
+  </div>
 
-        const map = L.map('map').setView([lat, lon], 13);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; OpenStreetMap contributors'
-        }).addTo(map);
+  <div class="section-title">Device Location</div>
+  <div id="map"></div>
 
-        L.marker([lat, lon]).addTo(map)
-            .bindPopup('<b>Leonardo Jr. Unit 01</b><br>稼働中')
-            .openPopup();
-    </script>
+  <div class="section-title">Registered Devices</div>
+  <div class="device-grid" id="device-grid">
+    <div class="empty"><div class="icon">...</div><div>Loading device info...</div></div>
+  </div>
+</div>
+
+<script>
+const API_BASE = window.location.origin;
+let token = null;
+let deviceMap = null;
+
+function getParams() {
+  const p = new URLSearchParams(window.location.search);
+  return {
+    deviceId: p.get('device_id') || localStorage.getItem('ljDeviceId') || '',
+    accessToken: p.get('token') || localStorage.getItem('ljToken') || ''
+  };
+}
+
+function authHeaders() {
+  return token
+    ? { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }
+    : { 'Content-Type': 'application/json' };
+}
+
+async function fetchDevice(deviceId) {
+  try {
+    const res = await fetch(
+      API_BASE + '/api/v1/devices/' + encodeURIComponent(deviceId) + '/status',
+      { headers: authHeaders() }
+    );
+    if (res.ok) return await res.json();
+  } catch(e) { console.error('fetchDevice:', e); }
+  return null;
+}
+
+function renderStats(d) {
+  document.getElementById('stat-device').textContent = d.device_id || '---';
+  const st = document.getElementById('stat-status');
+  st.textContent = (d.status || 'unknown').toUpperCase();
+  st.style.color = d.status === 'active' ? 'var(--green)' : 'var(--red)';
+  document.getElementById('stat-plan').textContent = (d.plan_type || 'consumer').toUpperCase();
+  document.getElementById('stat-location').textContent =
+    (d.lat && d.lon) ? Number(d.lat).toFixed(4) + ', ' + Number(d.lon).toFixed(4) : 'Not set';
+}
+
+function renderDevice(d) {
+  var targets = '<span style="color:var(--text2)">Default</span>';
+  if (d.detection_targets) {
+    try {
+      var arr = typeof d.detection_targets === 'string' ? JSON.parse(d.detection_targets) : d.detection_targets;
+      targets = arr.map(function(t){ return '<span class="target-tag">' + t + '</span>'; }).join(' ');
+    } catch(e) { targets = String(d.detection_targets); }
+  }
+
+  var notify = 'Not configured';
+  if (d.notification_target) {
+    try {
+      var obj = typeof d.notification_target === 'string' ? JSON.parse(d.notification_target) : d.notification_target;
+      var parts = [];
+      if (obj.line_token) parts.push('LINE');
+      if (obj.email) parts.push(obj.email);
+      notify = parts.join(', ') || 'Configured';
+    } catch(e) { notify = 'Configured'; }
+  }
+
+  var sc = d.status === 'active' ? 'badge-active' : 'badge-suspended';
+  document.getElementById('device-grid').innerHTML =
+    '<div class="card"><div class="card-body">' +
+    '<div class="device">' + (d.device_id || '---') + '</div>' +
+    '<div class="info-row"><span class="key">Status</span><span class="val"><span class="badge ' + sc + '">' + (d.status || 'active').toUpperCase() + '</span></span></div>' +
+    '<div class="info-row"><span class="key">Plan</span><span class="val">' + (d.plan_type || 'consumer') + '</span></div>' +
+    '<div class="info-row"><span class="key">Location</span><span class="val">' + (d.lat ? Number(d.lat).toFixed(4) + ', ' + Number(d.lon).toFixed(4) : 'Not set') + '</span></div>' +
+    '<div class="info-row"><span class="key">Notify</span><span class="val">' + notify + '</span></div>' +
+    '<div class="info-row"><span class="key">Targets</span><span class="val">' + targets + '</span></div>' +
+    '<div class="info-row"><span class="key">Created</span><span class="val">' + fmtTime(d.created_at) + '</span></div>' +
+    '</div></div>';
+}
+
+function renderMap(d) {
+  if (!deviceMap) {
+    deviceMap = L.map('map', { zoomControl: true, attributionControl: false }).setView([36.2, 137.0], 6);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(deviceMap);
+  }
+  if (d.lat && d.lon) {
+    var lat = Number(d.lat), lon = Number(d.lon);
+    var icon = L.divIcon({
+      className: '',
+      html: '<div style="width:14px;height:14px;background:#22d3ee;border:2px solid #fff;border-radius:50%;box-shadow:0 0 12px rgba(34,211,238,0.6);"></div>',
+      iconSize: [14, 14], iconAnchor: [7, 7]
+    });
+    L.marker([lat, lon], { icon: icon })
+      .bindPopup('<b style="color:#000">' + d.device_id + '</b><br>' + lat.toFixed(4) + ', ' + lon.toFixed(4))
+      .addTo(deviceMap).openPopup();
+    deviceMap.setView([lat, lon], 13);
+  }
+}
+
+function fmtTime(iso) {
+  try { return new Date(iso).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', hour12: false }); }
+  catch(e) { return iso || '---'; }
+}
+
+function updateClock() {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', hour12: false });
+}
+
+async function init() {
+  var params = getParams();
+  token = params.accessToken;
+  if (params.deviceId) {
+    localStorage.setItem('ljDeviceId', params.deviceId);
+    var d = await fetchDevice(params.deviceId);
+    if (d) { renderStats(d); renderDevice(d); renderMap(d); return; }
+    var fallback = { device_id: params.deviceId, status: 'active', plan_type: 'consumer' };
+    renderStats(fallback); renderDevice(fallback); renderMap(fallback);
+  } else {
+    document.getElementById('device-grid').innerHTML =
+      '<div class="empty"><div class="icon">&#x1F4E1;</div><div>No device registered.<br>Scan QR code to set up your device.</div></div>';
+  }
+}
+
+updateClock();
+setInterval(updateClock, 1000);
+init();
+</script>
 </body>
 </html>
