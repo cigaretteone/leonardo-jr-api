@@ -107,5 +107,6 @@ class LocationHistory(Base):
     
     ip_address = Column(String(45), nullable=True)
     user_agent = Column(String(255), nullable=True)
+    active_flag = Column(Boolean, default=False)
 
     device = relationship("Device", back_populates="location_history")
