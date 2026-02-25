@@ -1,0 +1,143 @@
+﻿<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Leonardo Jr. 開発進捗報告書</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap');
+        
+        @page { size: A4; margin: 0; }
+        
+        body { 
+            font-family: 'Noto Sans JP', "Hiragino Kaku Gothic ProN", Meiryo, sans-serif; 
+            color: #333; 
+            line-height: 1.5; 
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+            -webkit-print-color-adjust: exact;
+        }
+
+        .page { 
+            width: 210mm; 
+            height: 297mm;
+            padding: 15mm 20mm; 
+            margin: 10mm auto; 
+            background: white; 
+            box-shadow: 0 0 10px rgba(0,0,0,0.1); 
+            position: relative; 
+            box-sizing: border-box;
+        }
+
+        @media print { 
+            body { background: none; } 
+            .page { margin: 0; box-shadow: none; width: 100%; height: 100%; } 
+            .no-print { display: none; } 
+        }
+
+        header { border-bottom: 2px solid #1a365d; padding-bottom: 10px; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: flex-end; }
+        .report-title { font-size: 22px; font-weight: bold; color: #1a365d; margin: 0; }
+        .confidential { position: absolute; top: 8mm; right: 20mm; color: #c53030; border: 1px solid #c53030; padding: 2px 8px; font-size: 10px; font-weight: bold; }
+        
+        h1 { font-size: 16px; background-color: #e2e8f0; padding: 6px 10px; border-left: 5px solid #2b6cb0; margin-top: 20px; margin-bottom: 10px; }
+        h2 { font-size: 14px; border-bottom: 1px solid #ddd; padding-bottom: 2px; margin-top: 10px; color: #2d3748; }
+        p, li { font-size: 10.5pt; margin-bottom: 5px; }
+        ul { padding-left: 20px; margin-top: 5px; }
+
+        .status-box { display: flex; gap: 10px; margin-bottom: 15px; }
+        .status-item { flex: 1; background: #f7fafc; border: 1px solid #e2e8f0; padding: 8px; border-radius: 4px; }
+        .status-title { font-weight: bold; font-size: 11px; color: #4a5568; display: block; }
+        .status-value { font-weight: bold; color: #2b6cb0; font-size: 12px; }
+
+        .roadmap-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+        .phase-box { border: 1px solid #cbd5e0; border-radius: 4px; padding: 10px; }
+        .phase-header { background: #2b6cb0; color: white; padding: 4px 8px; margin: -10px -10px 8px -10px; font-weight: bold; font-size: 13px; }
+
+        .footer { position: absolute; bottom: 15mm; left: 0; right: 0; text-align: center; font-size: 9px; color: #999; border-top: 1px solid #eee; padding-top: 10px; width: 170mm; margin: 0 auto; }
+    </style>
+</head>
+<body>
+<div class="page">
+    <div class="confidential">CONFIDENTIAL / 守秘義務契約適用</div>
+    
+    <header>
+        <div>
+            <div style="font-size: 11px; color: #666;">JAPAN Renaissance Partners (JRP)</div>
+            <h1 class="report-title">Leonardo Jr. 開発進捗報告書</h1>
+        </div>
+        <div style="text-align: right; font-size: 11px;">
+            報告日: 2026年2月25日<br>
+            宛先: クライアント担当者様
+        </div>
+    </header>
+
+    <h1>1. QRセットアップ機能 実装完了のご報告</h1>
+    <p>本日、Leonardo Jr. の初期セットアップフロー（QRコード方式）の実装が完了し、実機を用いたエンドツーエンド動作確認まで完了いたしました。</p>
+    
+    <div class="status-box">
+        <div class="status-item">
+            <span class="status-title">対象デバイス</span>
+            <span class="status-value">専用エッジAIボード<br>(ARM 64bit / 8GB RAM)</span>
+        </div>
+        <div class="status-item">
+            <span class="status-title">実装ステータス</span>
+            <span class="status-value" style="color:green;">✔ E2E動作確認済み</span>
+        </div>
+        <div class="status-item">
+            <span class="status-title">クラウド基盤</span>
+            <span class="status-value">Render / PostgreSQL</span>
+        </div>
+    </div>
+
+    <h2>【実装内容詳細】</h2>
+    <ul>
+        <li><strong>デバイス側 (Edge):</strong> device_id自動生成・永続化、QRコード生成、systemd自動起動、APIトークン認証</li>
+        <li><strong>クラウド側 (Cloud):</strong> FastAPI基盤構築、PostgreSQLデータ管理</li>
+        <li><strong>E2Eフロー:</strong> QR読取 → ユーザー/デバイス登録 → 位置情報登録 → <strong>検知イベント送信 (確認済)</strong></li>
+    </ul>
+
+    <h1>2. ダッシュボード統合について</h1>
+    <p>既存デザインを継承し、以下の機能を追加実装しました。</p>
+    <ul>
+        <li>デバイス管理カード表示（ステータス・プラン確認）</li>
+        <li>地図上への設置位置ピン表示</li>
+        <li>既存Event Viewerとの連携</li>
+    </ul>
+
+    <h1>3. 今後の実証計画（ロードマップ）</h1>
+    <div class="roadmap-grid">
+        <div class="phase-box">
+            <div class="phase-header">α実証（Phase 1）</div>
+            <p><strong>期間:</strong> 約3ヶ月 (技術安定性検証)</p>
+            <ul style="font-size: 9pt;">
+                <li>最大10拠点設置</li>
+                <li>稼働率目標 95%以上</li>
+                <li>通信断絶時の復帰確認</li>
+                <li>誤検知率の分析</li>
+            </ul>
+        </div>
+        <div class="phase-box">
+            <div class="phase-header">β実証（Phase 2）</div>
+            <p><strong>期間:</strong> α終了後 3ヶ月 (UX検証)</p>
+            <ul style="font-size: 9pt;">
+                <li>通知速度評価</li>
+                <li>ダッシュボード操作性</li>
+                <li>現場フィードバック収集</li>
+            </ul>
+        </div>
+    </div>
+
+    <h1>4. 直近の準備実装</h1>
+    <ul>
+        <li>Heartbeat機能（死活監視）の実装</li>
+        <li>通信失敗時のリトライ処理（Re-try Logic）の強化</li>
+        <li>ログ収集基盤の整備</li>
+    </ul>
+
+    <div class="footer">
+        本資料に含まれる情報は、守秘義務契約に基づき取り扱われます。<br>
+        © 2026 JAPAN Renaissance Partners. All Rights Reserved.
+    </div>
+</div>
+</body>
+</html>

@@ -1,8 +1,8 @@
-"""
+﻿"""
 routers/event_router.py — 検知イベント受信・デバイスステータス・オフラインログ
 
-POST /api/v1/devices/{device_id}/event        - 検知イベント受信（APIトークン認証）
-GET  /api/v1/devices/{device_id}/status       - デバイスステータス確認（APIトークン認証）
+POST /api/v1/devices/{device_id}/event         - 検知イベント受信（APIトークン認証）
+GET  /api/v1/devices/{device_id}/status        - デバイスステータス確認（APIトークン認証）
 POST /api/v1/devices/{device_id}/upload-logs  - 圏外ログ一括アップロード（APIトークン認証）
 """
 
@@ -29,12 +29,13 @@ from ..services.notification_service import (
     send_detection_notification,
     send_mismatch_alert,
 )
+from ..services.device_service import update_last_seen
 
 router = APIRouter()
 
 
 def _get_client_ip(request: Request) -> str | None:
-    """リクエスト元 IP を取得する（リバースプロキシ越しも考慮）。"""
+    """リクエスト元 IP を取得する（リバースプロキシ超しもあり）。"""
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()
@@ -55,17 +56,18 @@ async def receive_event(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> DetectionEventResponse:
     """
-    デバイスが AI 検知した際に送信するエンドポイント。
+    デバイスが AI 検知した際に通信するエンドポイント。
     X-Api-Token ヘッダーで認証する（JWT ではない）。
 
     処理フロー:
-      1. デバイス status 確認（suspended → 503）
-      2. detection_events にレコード挿入
-      3. 発報 IP からジオロケーション取得 → 登録座標と距離計算
-      4. 150km 超 or 都道府県不一致 → location_mismatch = TRUE → 逸脱アラート
-      5. 通常の検知通知を送信
+      1. デバイス status 確認（suspended -> 503）
+      2. Heartbeat更新 (last_seen)
+      3. detection_events にレコード挿入
+      4. 発報 IP からジオロケーション取得 -> 登録座標と距離計算
+      5. 150km 超 or 都道府県不一致 -> location_mismatch = TRUE -> 逸脱アラート
+      6. 通常の検知通知を送信
     """
-    # device_id の一致確認（URL パスと api_token のデバイスが合っているか）
+    # device_id の不一致確認（URL パスと api_token のデバイスが合っているか）
     if device.device_id != device_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -79,7 +81,10 @@ async def receive_event(
             detail="このデバイスは停止中です",
         )
 
-    # Step 2: イベントレコード挿入（IP / 距離は後から更新）
+    # Step 2: Heartbeat更新 (last_seen)
+    await update_last_seen(db, device_id)
+
+    # Step 3: イベントレコード挿入（IP / 距離は後から更新）
     detected_at = body.timestamp or datetime.now(timezone.utc)
     ip = _get_client_ip(request)
 
@@ -94,7 +99,7 @@ async def receive_event(
     db.add(event)
     await db.flush()  # id を取得するために flush（commit はまだしない）
 
-    # Step 3: 登録座標の取得 → IP ジオロケーション → 距離計算
+    # Step 4: 登録座標の取得 -> IP ジオロケーション -> 距離計算
     active_loc = await get_active_location(db, device_id)
     mismatch = False
     distance_km = None
@@ -104,11 +109,11 @@ async def receive_event(
         mismatch, distance_km, event_region = await check_location_mismatch(
             registered_lat=float(active_loc.lat),
             registered_lon=float(active_loc.lon),
-            registered_region="",  # 実証機ではGPS座標の逆ジオコードは省略
+            registered_region="",  # 実証機ではGPS座標の逆ジオコード省略
             event_ip=ip,
         )
 
-    # Step 4: イベントレコードを更新
+    # Step 5: イベントレコードを更新
     event.ip_geolocation_region = event_region or None
     event.distance_from_registered_km = distance_km
     event.location_mismatch = mismatch
@@ -116,7 +121,7 @@ async def receive_event(
     await db.commit()
     await db.refresh(event)
 
-    # Step 5: 通知（非ブロッキングで送信。通知失敗でもレスポンスは返す）
+    # Step 6: 通知（非ブロッキングで送信。通知失敗でもレスポンスは返す）
     try:
         await send_detection_notification(
             device.notification_target,
@@ -132,7 +137,7 @@ async def receive_event(
                 event_region,
             )
     except Exception as exc:  # noqa: BLE001
-        # 通知失敗はログに記録するが、発報エンドポイント自体は成功レスポンスを返す
+        # 通知失敗をログに記録するが、発報エンドポイント自体は成功レスポンスを返す
         import logging
         logging.getLogger(__name__).error("通知送信エラー: %s", exc)
 
@@ -142,7 +147,7 @@ async def receive_event(
 @router.get(
     "/{device_id}/status",
     response_model=DeviceStatusResponse,
-    summary="デバイスステータス確認（圏内復帰時に呼ぶ）",
+    summary="デバイスステータス確認（圏外復帰時に呼ぶ）",
 )
 async def get_device_status(
     device_id: str,
@@ -150,11 +155,14 @@ async def get_device_status(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> DeviceStatusResponse:
     """
-    デバイスが LTE 圏内に復帰した際に呼び出し、現在の status を確認する。
+    デバイスが LTE 圏外に復帰した際に呼び出し、現在の status を確認する。
     suspended の場合はデバイス側でアラームを停止する等の処置を行う。
     """
     if device.device_id != device_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="不正なアクセスです")
+
+    # Heartbeat更新
+    await update_last_seen(db, device_id)
 
     active_loc = await get_active_location(db, device_id)
 
@@ -186,8 +194,8 @@ async def upload_logs(
     """
     LTE 圏外中に溜まった JSONL ログを一括で detection_events に挿入する。
 
-    オフラインログは IP ジオロケーションを行わない
-    （圏外中のタイムスタンプが不正確なため、location_mismatch 判定は省略）。
+    オフラインログは IP ジオロケーションを行わない。
+    （圏外中のタイムスタンプが不正確なため、location_mismatch 判定省略）
     """
     if device.device_id != device_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="不正なアクセスです")
@@ -197,6 +205,9 @@ async def upload_logs(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="このデバイスは停止中です",
         )
+
+    # Heartbeat更新
+    await update_last_seen(db, device_id)
 
     events = [
         DetectionEvent(

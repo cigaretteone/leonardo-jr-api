@@ -1,4 +1,4 @@
-"""
+﻿"""
 services/device_service.py — デバイス登録ロジック
 
 factory_token 検証・devices レコード作成・api_token 発行を担う。
@@ -8,6 +8,7 @@ import hashlib
 import json
 import secrets
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -35,7 +36,7 @@ def verify_factory_token_hash(device_id: str, fth: str) -> bool:
     """
     QR の fth パラメータを検証する。
 
-    サーバ側で factory_token を再導出し、そのハッシュと fth を比較する。
+    サーバー側で factory_token を再導出し、そのハッシュと fth を比較する。
     タイミング攻撃対策に secrets.compare_digest を使用する。
     """
     expected = _derive_factory_token_hash(_derive_factory_token(device_id))
@@ -60,9 +61,9 @@ async def register_device(
     """
     デバイスを所有者に紐付ける。
 
-    - devices レコードが存在しない → その場で作成（pre-register なし）
-    - 存在 + owner_user_id IS NULL → 登録可能
-    - 存在 + owner 設定済み → ValueError を送出（呼び出し元で 409 を返すこと）
+    - devices レコードが存在しない -> その場で作成（pre-register なし）
+    - 存在 + owner_user_id IS NULL -> 登録可能
+    - 存在 + owner 設定済み -> ValueError を送出（呼び出し元で 409 を返すこと）
 
     Returns:
         登録済みの Device オブジェクト（api_token が設定されている）
@@ -133,7 +134,7 @@ async def update_device_setup(
     notification_target: dict | None,
     detection_targets: list[str] | None,
 ) -> Device:
-    """通知先・検知対象を devices テーブルに保存する。"""
+    """通知先や検知対象を devices テーブルに保存する。"""
     if notification_target is not None:
         device.notification_target = json.dumps(notification_target, ensure_ascii=False)
     if detection_targets is not None:
@@ -142,3 +143,15 @@ async def update_device_setup(
     await db.commit()
     await db.refresh(device)
     return device
+
+
+async def update_last_seen(db: AsyncSession, device_id: str) -> None:
+    """デバイスの最終通信時刻 (last_seen) を現在時刻で更新する（Heartbeat）。"""
+    await db.execute(
+        update(Device)
+        .where(Device.device_id == device_id)
+        .values(last_seen=datetime.now(timezone.utc))
+    )
+    # ここでは commit しない（呼び出し元で他の処理と一緒に commit されることを期待、または flush）
+    # ただし、単独で呼ばれるケースもあるため、明示的に commit しておくのが安全
+    await db.commit()
