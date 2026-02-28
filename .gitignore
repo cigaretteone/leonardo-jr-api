@@ -28,3 +28,5 @@ Thumbs.db
 
 # デバイス側の生成物（実機では /etc/leonardo/ に配置）
 device/scripts/__pycache__/
+*.bak_*
+alembic.ini.save
