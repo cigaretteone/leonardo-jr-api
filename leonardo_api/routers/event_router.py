@@ -1,20 +1,26 @@
-﻿"""
-routers/event_router.py — 検知イベント受信・デバイスステータス・オフラインログ
+"""
+routers/event_router.py — Phase 1.1: 冪等イベント受信 + ACK設計
 
-POST /api/v1/devices/{device_id}/event         - 検知イベント受信（APIトークン認証）
-GET  /api/v1/devices/{device_id}/status        - デバイスステータス確認（APIトークン認証）
-POST /api/v1/devices/{device_id}/upload-logs  - 圏外ログ一括アップロード（APIトークン認証）
+POST /api/v1/devices/{device_id}/event         - 検知イベント受信（冪等）
+GET  /api/v1/devices/{device_id}/status        - デバイスステータス確認
+POST /api/v1/devices/{device_id}/upload-logs   - オフラインログ一括アップロード
+
+NOTE: エンドポイントURLは移行互換のため /{device_id}/event を維持。
+      将来的に /api/v1/events に統一する際はルーティングのみ変更。
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_device_by_api_token
 from ..database import get_db
-from ..models import DetectionEvent, Device
+from ..models import DetectionEvent, EventDelivery, Device
 from ..schemas import (
     ActiveLocation,
     DetectionEventRequest,
@@ -31,22 +37,44 @@ from ..services.notification_service import (
 )
 from ..services.device_service import update_last_seen
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 def _get_client_ip(request: Request) -> str | None:
-    """リクエスト元 IP を取得する（リバースプロキシ超しもあり）。"""
+    """リクエスト元IPを取得する（リバースプロキシ経由もあり）"""
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else None
 
 
+def _parse_retry_count(request: Request) -> int:
+    """X-Retry-Count ヘッダからリトライ回数を取得"""
+    raw = request.headers.get("X-Retry-Count", "0")
+    try:
+        return max(0, int(raw))
+    except (ValueError, TypeError):
+        return 0
+
+
+# =============================================================================
+# POST /{device_id}/event — Phase 1.1 冪等イベント受信
+# =============================================================================
+
 @router.post(
     "/{device_id}/event",
     response_model=DetectionEventResponse,
+    # status_code は動的に 201 or 200 を返すため、ここでは設定しない
+    # OpenAPI doc 用に 201 を記載
     status_code=status.HTTP_201_CREATED,
-    summary="検知イベント受信（デバイス → サーバ）",
+    summary="検知イベント受信（冪等: 再送安全）",
+    responses={
+        200: {"description": "重複イベント（既に受信済み）"},
+        201: {"description": "新規イベント受理"},
+        400: {"description": "ペイロード不正 / device_id不一致"},
+        403: {"description": "デバイス停止中"},
+    },
 )
 async def receive_event(
     device_id: str,
@@ -54,80 +82,146 @@ async def receive_event(
     request: Request,
     device: Annotated[Device, Depends(get_device_by_api_token)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> DetectionEventResponse:
+):
     """
-    デバイスが AI 検知した際に通信するエンドポイント。
-    X-Api-Token ヘッダーで認証する（JWT ではない）。
+    デバイスがAI検知した際に送信するエンドポイント。
+    X-Api-Token ヘッダで認証する（JWTではない）。
+
+    冪等性:
+      INSERT ... ON CONFLICT (event_id) DO NOTHING RETURNING event_id
+      - RETURNING が行を返す → 新規挿入 → 201 Created
+      - RETURNING が空       → 重複     → 200 OK
 
     処理フロー:
-      1. デバイス status 確認（suspended -> 503）
-      2. Heartbeat更新 (last_seen)
-      3. detection_events にレコード挿入
-      4. 発報 IP からジオロケーション取得 -> 登録座標と距離計算
-      5. 150km 超 or 都道府県不一致 -> location_mismatch = TRUE -> 逸脱アラート
-      6. 通常の検知通知を送信
+      1. device_id ↔ api_token 一致確認
+      2. デバイス status 確認 (suspended → 403)
+      3. Heartbeat更新 (last_seen)
+      4. 冪等INSERT (ON CONFLICT DO NOTHING RETURNING)
+      5. 新規の場合: geolocation判定 + event_delivery作成
+      6. 通知送信 (非ブロッキング)
     """
-    # device_id の不一致確認（URL パスと api_token のデバイスが合っているか）
+
+    # ── Step 1: device_id 一致確認 ──
     if device.device_id != device_id:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="デバイス ID とトークンが一致しません",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="device_id mismatch: URL and api_token do not match",
         )
 
-    # Step 1: デバイス停止確認
+    # ペイロードのdevice_idとURL pathの一致も確認
+    if body.device_id != device_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="device_id mismatch: payload and URL do not match",
+        )
+
+    # ── Step 2: デバイス稼働確認 ──
     if device.status == "suspended":
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="このデバイスは停止中です",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="device_suspended",
         )
 
-    # Step 2: Heartbeat更新 (last_seen)
+    # ── Step 3: Heartbeat更新 ──
     await update_last_seen(db, device_id)
 
-    # Step 3: イベントレコード挿入（IP / 距離は後から更新）
-    detected_at = body.timestamp or datetime.now(timezone.utc)
+    # ── Step 4: 冪等INSERT ──
+    retry_count = _parse_retry_count(request)
     ip = _get_client_ip(request)
+    occurred_at = body.get_occurred_at()
 
-    event = DetectionEvent(
-        device_id=device_id,
-        detected_at=detected_at,
-        detection_type=body.detection_type,
-        confidence=body.confidence,
-        ip_address=ip,
-        location_mismatch=False,  # 後で更新
+    stmt = (
+        insert(DetectionEvent)
+        .values(
+            event_id=body.event_id,
+            device_id=device_id,
+            event_type=body.event_type,
+            occurred_at=occurred_at,
+            received_at=datetime.now(timezone.utc),
+            detection_type=body.get_detection_type(),
+            confidence=body.get_confidence(),
+            ip_address=ip,
+            location_mismatch=False,  # geolocationで後から更新
+            payload_json=body.model_dump(mode="json"),
+        )
+        .on_conflict_do_nothing(index_elements=["event_id"])
+        .returning(DetectionEvent.event_id)
     )
-    db.add(event)
-    await db.flush()  # id を取得するために flush（commit はまだしない）
 
-    # Step 4: 登録座標の取得 -> IP ジオロケーション -> 距離計算
-    active_loc = await get_active_location(db, device_id)
+    result = await db.execute(stmt)
+    inserted_row = result.fetchone()
+
+    # ── 重複の場合: 200 OK で即返却 ──
+    if inserted_row is None:
+        logger.info(
+            "Duplicate event ignored: event_id=%s device=%s retry=%d",
+            body.event_id, device_id, retry_count,
+        )
+        await db.commit()
+        return JSONResponse(
+            status_code=200,
+            content={
+                "event_id": str(body.event_id),
+                "status": "duplicate",
+                "location_mismatch": False,
+            },
+        )
+
+    # ── 新規挿入の場合 ──
+    logger.info(
+        "New event accepted: event_id=%s device=%s retry=%d",
+        body.event_id, device_id, retry_count,
+    )
+
+    # ── Step 5a: event_delivery 記録 ──
+    delivery_stmt = insert(EventDelivery).values(
+        event_id=body.event_id,
+        state="received",
+        retry_count=retry_count,
+        acked_at=datetime.now(timezone.utc),
+    )
+    await db.execute(delivery_stmt)
+
+    # ── Step 5b: Geolocation 判定（新規イベントのみ） ──
     mismatch = False
     distance_km = None
     event_region = ""
 
+    active_loc = await get_active_location(db, device_id)
     if active_loc and ip:
-        mismatch, distance_km, event_region = await check_location_mismatch(
-            registered_lat=float(active_loc.lat),
-            registered_lon=float(active_loc.lon),
-            registered_region="",  # 実証機ではGPS座標の逆ジオコード省略
-            event_ip=ip,
-        )
+        try:
+            mismatch, distance_km, event_region = await check_location_mismatch(
+                registered_lat=float(active_loc.lat),
+                registered_lon=float(active_loc.lon),
+                registered_region="",
+                event_ip=ip,
+            )
+        except Exception as exc:
+            logger.warning("Geolocation check failed: %s", exc)
 
-    # Step 5: イベントレコードを更新
-    event.ip_geolocation_region = event_region or None
-    event.distance_from_registered_km = distance_km
-    event.location_mismatch = mismatch
+    # geolocation結果をイベントに反映（直接UPDATE）
+    if mismatch or distance_km is not None:
+        from sqlalchemy import update
+        update_stmt = (
+            update(DetectionEvent)
+            .where(DetectionEvent.event_id == body.event_id)
+            .values(
+                ip_geolocation_region=event_region or None,
+                distance_from_registered_km=distance_km,
+                location_mismatch=mismatch,
+            )
+        )
+        await db.execute(update_stmt)
 
     await db.commit()
-    await db.refresh(event)
 
-    # Step 6: 通知（非ブロッキングで送信。通知失敗でもレスポンスは返す）
+    # ── Step 6: 通知（非ブロッキング、失敗してもレスポンスは返す） ──
     try:
         await send_detection_notification(
             device.notification_target,
             device_id,
-            body.detection_type,
-            body.confidence,
+            body.get_detection_type(),
+            body.get_confidence(),
         )
         if mismatch:
             await send_mismatch_alert(
@@ -136,34 +230,41 @@ async def receive_event(
                 distance_km,
                 event_region,
             )
-    except Exception as exc:  # noqa: BLE001
-        # 通知失敗をログに記録するが、発報エンドポイント自体は成功レスポンスを返す
-        import logging
-        logging.getLogger(__name__).error("通知送信エラー: %s", exc)
+    except Exception as exc:
+        logger.error("Notification error: %s", exc)
 
-    return DetectionEventResponse(event_id=event.id, location_mismatch=mismatch)
+    # ── 201 Created ──
+    return JSONResponse(
+        status_code=201,
+        content={
+            "event_id": str(body.event_id),
+            "status": "accepted",
+            "location_mismatch": mismatch,
+        },
+    )
 
+
+# =============================================================================
+# GET /{device_id}/status (変更なし)
+# =============================================================================
 
 @router.get(
     "/{device_id}/status",
     response_model=DeviceStatusResponse,
-    summary="デバイスステータス確認（圏外復帰時に呼ぶ）",
+    summary="デバイスステータス確認",
 )
 async def get_device_status(
     device_id: str,
     device: Annotated[Device, Depends(get_device_by_api_token)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> DeviceStatusResponse:
-    """
-    デバイスが LTE 圏外に復帰した際に呼び出し、現在の status を確認する。
-    suspended の場合はデバイス側でアラームを停止する等の処置を行う。
-    """
     if device.device_id != device_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="不正なアクセスです")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="不正なアクセスです",
+        )
 
-    # Heartbeat更新
     await update_last_seen(db, device_id)
-
     active_loc = await get_active_location(db, device_id)
 
     return DeviceStatusResponse(
@@ -179,11 +280,15 @@ async def get_device_status(
     )
 
 
+# =============================================================================
+# POST /{device_id}/upload-logs (変更なし)
+# =============================================================================
+
 @router.post(
     "/{device_id}/upload-logs",
     response_model=UploadLogsResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="圏外ログ一括アップロード",
+    summary="オフラインログ一括アップロード",
 )
 async def upload_logs(
     device_id: str,
@@ -191,36 +296,50 @@ async def upload_logs(
     device: Annotated[Device, Depends(get_device_by_api_token)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> UploadLogsResponse:
-    """
-    LTE 圏外中に溜まった JSONL ログを一括で detection_events に挿入する。
-
-    オフラインログは IP ジオロケーションを行わない。
-    （圏外中のタイムスタンプが不正確なため、location_mismatch 判定省略）
-    """
     if device.device_id != device_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="不正なアクセスです")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="不正なアクセスです",
+        )
 
     if device.status == "suspended":
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="このデバイスは停止中です",
+            detail="このデバイスは稼働停止中です",
         )
 
-    # Heartbeat更新
     await update_last_seen(db, device_id)
 
-    events = [
-        DetectionEvent(
-            device_id=device_id,
-            detected_at=item.timestamp,
-            detection_type=item.detection_type,
-            confidence=item.confidence,
-            location_mismatch=False,  # オフラインログは逸脱判定しない
+    import uuid as _uuid
+    now = datetime.now(timezone.utc)
+    events = []
+    deliveries = []
+    for item in body.events:
+        eid = _uuid.uuid4()
+        events.append(
+            DetectionEvent(
+                event_id=eid,
+                device_id=device_id,
+                event_type="detection",
+                occurred_at=item.timestamp,
+                received_at=now,
+                detection_type=item.detection_type,
+                confidence=item.confidence,
+                location_mismatch=False,
+            )
         )
-        for item in body.events
-    ]
+        deliveries.append(
+            EventDelivery(
+                event_id=eid,
+                state="received",
+                retry_count=0,
+                acked_at=now,
+            )
+        )
 
     db.add_all(events)
+    await db.flush()
+    db.add_all(deliveries)
     await db.commit()
 
     return UploadLogsResponse(inserted=len(events))

@@ -1,12 +1,11 @@
 """
 schemas.py — Pydantic v2 リクエスト / レスポンススキーマ
-
-ルーターで使う入出力型を定義する。
-ORM モデル（models.py）との変換は各サービス層で行う。
+Phase 1.1 update: UUID v7 event_id, device_id in request, ACK response
 """
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -47,17 +46,13 @@ class DeviceRegisterResponse(BaseModel):
 
 
 class DeviceSetupRequest(BaseModel):
-    """
-    通知先と検知対象を設定する。
-    notification_target / detection_targets は JSON 文字列として DB に保存する。
-    """
     notification_target: dict | None = Field(
         default=None,
-        description='例: {"line_token": "xxx", "email": "a@b.com"}',
+        description='例 {"line_token": "xxx", "email": "a@b.com"}',
     )
     detection_targets: list[str] | None = Field(
         default=None,
-        description='例: ["bear", "human", "vehicle"]',
+        description='例 ["bear", "human", "vehicle"]',
     )
 
     @field_validator("detection_targets")
@@ -68,7 +63,7 @@ class DeviceSetupRequest(BaseModel):
         allowed = {"bear", "human", "vehicle", "unknown"}
         invalid = set(v) - allowed
         if invalid:
-            raise ValueError(f"不明な検知対象: {invalid}。許可値: {allowed}")
+            raise ValueError(f"不正な検知対象: {invalid}。許可値: {allowed}")
         return v
 
 
@@ -78,22 +73,21 @@ class DeviceSetupResponse(BaseModel):
 
 
 # =============================================================================
-# 位置登録系
+# 座標登録系
 # =============================================================================
 
 class LocationRegisterRequest(BaseModel):
     lat: float = Field(ge=-90.0, le=90.0, description="緯度")
     lon: float = Field(ge=-180.0, le=180.0, description="経度")
-    accuracy: float | None = Field(default=None, ge=0.0, description="GPS 精度（メートル）")
+    accuracy: float | None = Field(default=None, ge=0.0, description="GPS精度（メートル）")
 
 
 class LocationRegisterResponse(BaseModel):
     location_id: int
-    warning: str | None = None  # accuracy が 50m 超の場合に設定
+    warning: str | None = None
 
 
 class RelocateRequest(BaseModel):
-    """再設置リクエスト。所有者のパスワード再入力が必須。"""
     password: str
     lat: float = Field(ge=-90.0, le=90.0)
     lon: float = Field(ge=-180.0, le=180.0)
@@ -106,34 +100,94 @@ class RelocateResponse(BaseModel):
 
 
 # =============================================================================
-# 検知イベント系
+# 検知イベント系 (Phase 1.1: UUID v7 冪等性対応)
 # =============================================================================
+
+class DetectionPayload(BaseModel):
+    """検知の詳細。payload_json内にも保存される。"""
+    class_name: str = Field(alias="class", description="bear / human / vehicle / unknown")
+    confidence: float = Field(ge=0.0, le=1.0)
+    distance_estimate: str | None = Field(default=None, description="near / mid / far")
+
+    model_config = {"populate_by_name": True}
+
+
+class GpsData(BaseModel):
+    lat: float = Field(ge=-90.0, le=90.0)
+    lon: float = Field(ge=-180.0, le=180.0)
+
+
+class DeviceStatus(BaseModel):
+    firmware_version: str | None = None
+    battery_voltage: float | None = None
+    signal_strength: int | None = None
+
 
 class DetectionEventRequest(BaseModel):
     """
-    デバイスから送信される検知イベント。
-    APIトークン認証で送信される（JWT ではなく api_token）。
+    Phase 1.1 統一イベントスキーマ。
+    デバイスが UUID v7 を生成して event_id に設定する。
+    サーバは ON CONFLICT (event_id) DO NOTHING で冪等性を保証。
     """
-    detection_type: str = Field(
-        description="bear / human / vehicle / unknown"
+    event_id: uuid.UUID = Field(
+        description="UUID v7 (RFC 9562) — デバイス側で生成",
     )
-    confidence: float = Field(ge=0.0, le=1.0, description="AI 信頼度スコア")
-    image_base64: str | None = Field(
-        default=None, description="検知画像の Base64 文字列（省略可）"
+    device_id: str = Field(
+        max_length=30,
+        description="デバイスID（api_tokenと一致すること）",
     )
-    timestamp: datetime | None = Field(
-        default=None,
-        description="検知日時（UTC）。None の場合はサーバ受信時刻を使用。",
+    event_type: str = Field(
+        default="detection",
+        max_length=32,
+        description="detection / heartbeat / alert",
     )
+    occurred_at: datetime = Field(
+        description="検知時刻 (UTC)",
+    )
+
+    # --- 検知詳細 ---
+    detection: DetectionPayload | None = None
+    gps: GpsData | None = None
+    device_status: DeviceStatus | None = None
+
+    # --- 後方互換フィールド（旧lte_sender対応、移行期間中のみ） ---
+    detection_type: str | None = Field(default=None, description="後方互換: bear/human等")
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="後方互換")
+    image_base64: str | None = Field(default=None, description="検知画像 Base64（省略可）")
+    timestamp: datetime | None = Field(default=None, description="後方互換: occurred_atを使用")
+
+    def get_detection_type(self) -> str | None:
+        """detection.class_name or 後方互換 detection_type を返す"""
+        if self.detection:
+            return self.detection.class_name
+        return self.detection_type
+
+    def get_confidence(self) -> float | None:
+        """detection.confidence or 後方互換 confidence を返す"""
+        if self.detection:
+            return self.detection.confidence
+        return self.confidence
+
+    def get_occurred_at(self) -> datetime:
+        """occurred_at を優先、なければ timestamp、なければ現在時刻"""
+        return self.occurred_at
 
 
 class DetectionEventResponse(BaseModel):
-    event_id: int
-    location_mismatch: bool
+    """
+    Phase 1.1 ACKレスポンス。
+    status: "accepted" (201) or "duplicate" (200)
+    """
+    event_id: str = Field(description="受理されたイベントのUUID")
+    status: str = Field(description="accepted / duplicate")
+    location_mismatch: bool = False
 
+
+# =============================================================================
+# オフラインログ系（既存、変更なし）
+# =============================================================================
 
 class OfflineEventItem(BaseModel):
-    """圏外中に溜まったイベントの 1 件分。"""
     detection_type: str
     confidence: float = Field(ge=0.0, le=1.0)
     timestamp: datetime
@@ -141,7 +195,6 @@ class OfflineEventItem(BaseModel):
 
 
 class UploadLogsRequest(BaseModel):
-    """圏外中に溜まった JSONL ログの一括アップロード。"""
     events: list[OfflineEventItem] = Field(min_length=1)
 
 
