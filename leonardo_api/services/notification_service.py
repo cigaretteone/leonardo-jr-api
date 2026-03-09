@@ -79,8 +79,7 @@ def _send_email_sync(to_email: str, subject: str, body: str) -> bool:
         msg["From"] = settings.SMTP_FROM
         msg["To"] = to_email
 
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-            server.starttls()
+        with smtplib.SMTP_SSL(settings.SMTP_HOST, 465) as server:
             server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             server.send_message(msg)
         return True
