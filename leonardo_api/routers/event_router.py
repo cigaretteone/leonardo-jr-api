@@ -36,6 +36,7 @@ from ..services.notification_service import (
     send_mismatch_alert,
 )
 from ..services.device_service import update_last_seen
+from ..services.media_service import save_thumbnail, create_pending_video
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -213,6 +214,16 @@ async def receive_event(
         )
         await db.execute(update_stmt)
 
+    # ── Step 5c: サムネイル保存 (Phase 2.1) ──
+    thumbnail_b64 = getattr(body, 'thumbnail_b64', None)
+    if thumbnail_b64:
+        await save_thumbnail(db, str(body.event_id), device_id, thumbnail_b64)
+
+    # ── Step 5d: 動画リクエスト判定 (Phase 2.1: 常にtrue) ──
+    video_requested = True
+    if video_requested:
+        await create_pending_video(db, str(body.event_id))
+
     await db.commit()
 
     # ── Step 6: 通知（非ブロッキング、失敗してもレスポンスは返す） ──
@@ -233,13 +244,16 @@ async def receive_event(
     except Exception as exc:
         logger.error("Notification error: %s", exc)
 
-    # ── 201 Created ──
+    # ── 201 Created (Phase 2.1: video_requested追加) ──
+    upload_url = f"/api/v1/devices/{device_id}/events/{body.event_id}/video"
     return JSONResponse(
         status_code=201,
         content={
             "event_id": str(body.event_id),
             "status": "accepted",
             "location_mismatch": mismatch,
+            "video_requested": video_requested,
+            "upload_url": upload_url if video_requested else None,
         },
     )
 

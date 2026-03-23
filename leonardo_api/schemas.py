@@ -2,10 +2,10 @@
 schemas.py — Pydantic v2 リクエスト / レスポンススキーマ
 Phase 1.1 update: UUID v7 event_id, device_id in request, ACK response
 """
-
 import uuid
+from uuid import UUID
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -154,6 +154,7 @@ class DetectionEventRequest(BaseModel):
     detection_type: str | None = Field(default=None, description="後方互換: bear/human等")
     confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="後方互換")
     image_base64: str | None = Field(default=None, description="検知画像 Base64（省略可）")
+    thumbnail_b64: str | None = Field(default=None, max_length=200000, description="Phase 2.1: JPEG thumbnail base64")
     timestamp: datetime | None = Field(default=None, description="後方互換: occurred_atを使用")
 
     def get_detection_type(self) -> str | None:
