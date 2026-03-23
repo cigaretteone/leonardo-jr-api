@@ -67,7 +67,7 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-MEDIA_STORAGE_PATH = "/data/media"
+MEDIA_STORAGE_PATH = "/tmp/media"
 THUMBNAIL_SUBDIR = "thumbnails"
 VIDEO_SUBDIR = "videos"
 MAX_THUMBNAIL_SIZE = 200_000
