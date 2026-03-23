@@ -82,4 +82,4 @@ async def upload_video(
     codec = request.headers.get("X-Codec", "h265")
     resolution = request.headers.get("X-Resolution", "480p")
     duration_raw = request.headers.get("X-Duration-Sec")
-    duration_sec = float(duration_raw) if duration_raw else
+    duration_sec = float(duration_raw) if duration_raw else None
