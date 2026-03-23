@@ -54,10 +54,11 @@ async def upload_video(
     if device.status == "suspended":
         raise HTTPException(status_code=403, detail="device_suspended")
 
-    # event_id 存在確認
+    # event_id 存在確認（device_id紐付けチェック込み）
     evt = await db.execute(
         select(DetectionEvent.event_id).where(
-            DetectionEvent.event_id == event_id
+            DetectionEvent.event_id == event_id,
+            DetectionEvent.device_id == device_id,
         )
     )
     if evt.scalar_one_or_none() is None:
@@ -74,7 +75,7 @@ async def upload_video(
     if existing.scalar_one_or_none() is not None:
         return JSONResponse(
             status_code=200,
-            content={"status": "duplicate"},
+            content={"status": "duplicate", "event_id": event_id},
         )
 
     # ヘッダ取得
@@ -83,3 +84,81 @@ async def upload_video(
     resolution = request.headers.get("X-Resolution", "480p")
     duration_raw = request.headers.get("X-Duration-Sec")
     duration_sec = float(duration_raw) if duration_raw else None
+
+    if not client_sha:
+        raise HTTPException(status_code=400, detail="X-SHA256 header required")
+
+    # ボディ読み込み
+    video_data = await request.body()
+    if len(video_data) == 0:
+        raise HTTPException(status_code=400, detail="empty body")
+    if len(video_data) > MAX_VIDEO_SIZE:
+        return JSONResponse(
+            status_code=413,
+            content={"error": "file_too_large", "max_bytes": MAX_VIDEO_SIZE},
+        )
+
+    # 保存 + SHA-256検証
+    result = await save_video(
+        db=db,
+        event_id=event_id,
+        device_id=device_id,
+        video_data=video_data,
+        client_sha256=client_sha,
+        codec=codec,
+        resolution=resolution,
+        duration_sec=duration_sec,
+    )
+
+    if "error" in result:
+        code = 400 if result["error"] == "hash_mismatch" else 413
+        return JSONResponse(status_code=code, content=result)
+
+    await db.commit()
+
+    return JSONResponse(
+        status_code=201,
+        content={"status": "uploaded", "event_id": event_id},
+    )
+
+
+# =============================================================================
+# GET /events/{event_id}/video — 動画取得（ダッシュボード用）
+# =============================================================================
+
+@router.get(
+    "/events/{event_id}/video",
+    summary="動画取得",
+)
+async def get_video(
+    event_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    rel_path = await get_media_path(db, event_id, "video")
+    if rel_path is None:
+        raise HTTPException(status_code=404, detail="video not found")
+    full_path = Path(MEDIA_STORAGE_PATH) / rel_path
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail="video file missing")
+    return FileResponse(str(full_path), media_type="video/mp4")
+
+
+# =============================================================================
+# GET /events/{event_id}/thumbnail — サムネイル取得（ダッシュボード用）
+# =============================================================================
+
+@router.get(
+    "/events/{event_id}/thumbnail",
+    summary="サムネイル取得",
+)
+async def get_thumbnail(
+    event_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    rel_path = await get_media_path(db, event_id, "thumbnail")
+    if rel_path is None:
+        raise HTTPException(status_code=404, detail="thumbnail not found")
+    full_path = Path(MEDIA_STORAGE_PATH) / rel_path
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail="thumbnail file missing")
+    return FileResponse(str(full_path), media_type="image/jpeg")

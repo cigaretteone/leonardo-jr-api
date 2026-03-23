@@ -165,8 +165,11 @@ async def receive_event(
                 "event_id": str(body.event_id),
                 "status": "duplicate",
                 "location_mismatch": False,
+                "video_requested": False,
+                "upload_url": None,
             },
         )
+
 
     # ── 新規挿入の場合 ──
     logger.info(
