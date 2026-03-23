@@ -1,11 +1,11 @@
 """models.py -- DB models (Phase 1.1 update: UUID v7 event_id + event_delivery)"""
 import uuid
 from datetime import datetime, timezone
-
 from sqlalchemy import (
     Boolean, CheckConstraint, Column, DateTime,
-    ForeignKey, Integer, Numeric, String, text,
+    ForeignKey, Integer, Numeric, String, UniqueConstraint, text,
 )
+
 from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
 from sqlalchemy.orm import relationship
 
@@ -217,3 +217,25 @@ class LocationHistory(Base):
     user_agent = Column(String(255), nullable=True)
 
     device = relationship("Device", back_populates="location_history")
+
+class EventMedia(Base):
+    __tablename__ = "event_media"
+
+    media_id = Column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    event_id = Column(UUID(as_uuid=True), ForeignKey("detection_events.event_id"), nullable=False, index=True)
+    media_type = Column(String(16), nullable=False)
+    upload_status = Column(String(16), nullable=False, server_default="completed")
+    codec = Column(String(16))
+    resolution = Column(String(16))
+    duration_sec = Column(Numeric(5, 1))
+    file_size_bytes = Column(Integer)
+    sha256_hash = Column(String(64))
+    storage_path = Column(String(500))
+    uploaded_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (
+        UniqueConstraint("event_id", "media_type", name="uq_event_media"),
+        CheckConstraint("upload_status IN ('pending', 'uploading', 'completed', 'failed')", name="chk_upload_status"),
+        CheckConstraint("media_type IN ('thumbnail', 'video')", name="chk_media_type"),
+    )

@@ -1,9 +1,7 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 lte_sender.py — Leonardo Jr. LTE送信モジュール
 野外設置型省電力エッジAIデバイス用 イベント駆動型LTE送信
-
-Phase 1.1対応: UUID v7 event_id, JSON POST, X-Api-Token認証, 冪等性保証
 
 === 関数リスト ===
   _run(cmd, timeout)
@@ -38,22 +36,17 @@ Phase 1.1対応: UUID v7 event_id, JSON POST, X-Api-Token認証, 冪等性保証
   disable_modem(modem_index) -> None
       mmcli --disable でモデムを disable 状態にする（エラーは無視）。
 
-  send_event_http(metadata, wwan_ip) -> SendResult
-      Phase 1.1: JSON POST で JR API にイベントを送信する（指数バックオフ再試行）。
-      SendResult(acked=True)  → 200/201 受理
-      SendResult(acked=False, should_queue=False) → 永続エラー(4xx) リトライなし
-      SendResult(acked=False, should_queue=True)  → 一時エラー → キュー保存
+  send_event_http(image_path, metadata) -> bool
+      HTTP POST で画像 + メタデータを送信する（指数バックオフ再試行）。
 
   save_to_local_queue(image_path, metadata) -> bool
       送信失敗イベントをローカルキュー (JSON ファイル) に保存する。
-      metadata に event_id (UUID v7) が含まれるため再送時に同一 UUID で送信される。
 
   load_local_queue() -> list[Path]
       ローカルキューの JSON ファイルを古い順で返す。
 
   process_local_queue(limit) -> int
       LTE 接続済み状態で未送信キューを再送し、成功件数を返す（上限 limit 件）。
-      永続エラー(4xx)のエントリはキューから削除してスキップ。
 
   send_event_with_lte(...) -> bool
       メインエントリポイント。検知イベントをLTE送信する。
@@ -78,8 +71,7 @@ Phase 1.1対応: UUID v7 event_id, JSON POST, X-Api-Token認証, 冪等性保証
         └─ 失敗 → ローカルキュー保存して return False
   [8] 未送信キュー再送（最大 limit 件）
   [9] 本イベント HTTP POST 送信（最大 3 回リトライ）
-        └─ 永続エラー(4xx) → ログのみ（キューに入れない）
-        └─ 一時エラー      → ローカルキュー保存
+        └─ 失敗 → ローカルキュー保存
   [10] finally: simple-disconnect → disable → ネットワーク削除 → 推論再開フック（常に実行）
 """
 
@@ -88,7 +80,6 @@ import logging
 import subprocess
 import sys
 import time
-from collections import namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -115,11 +106,9 @@ from urllib3.poolmanager import PoolManager
 # ===========================================================
 # 定数定義（環境に合わせて変更してください）
 # ===========================================================
-
-# Phase 1.1: JR API のみに統一（旧 ENDPOINT_URL / BEARER_TOKEN 廃止）
-DEVICE_ID = "LJ-671493E4-QDSF"
-API_TOKEN = "m0lCjXhKXBooGZ87ty_ASxbIQh0iD_MQwrYC-CVYuNU"
-JR_API_URL_TEMPLATE = "https://leonardo-jr-api.onrender.com/api/v1/devices/{}/event"
+ENDPOINT_URL = "https://leonardo-receiver.onrender.com/api/v1/events"  # 送信先エンドポイント（要差し替え）
+BEARER_TOKEN = "leo-jr-secret-2024"             # Bearer 認証トークン（要差し替え）
+DEVICE_ID = "leonardo_jr_001"
 
 APN = "ppsim.jp"
 APN_USER = "pp@sim"
@@ -130,11 +119,9 @@ LTE_QUEUE_DIR = Path("/home/manta/leonardo_jr/lte_queue")
 LTE_QUEUE_MAX = 100
 
 CONNECT_TIMEOUT_SEC = 30    # LTE 接続タイムアウト（秒）
-SEND_TIMEOUT_SEC = 30       # HTTP 送信タイムアウト（秒）
+SEND_TIMEOUT_SEC = 60       # HTTP 送信タイムアウト（秒）
 MAX_RETRY = 3               # HTTP 送信最大再試行回数
-BASE_RETRY_DELAY = 2        # 指数バックオフ基本待機秒数 (delay = BASE * 2^attempt)
 SIGNAL_SKIP_THRESHOLD = 40  # 電波強度スキップ閾値（%）
-
 class SourceIPAdapter(HTTPAdapter):
     def __init__(self, source_ip, **kwargs):
         self._source_ip = source_ip
@@ -143,7 +130,6 @@ class SourceIPAdapter(HTTPAdapter):
     def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
         pool_kwargs["source_address"] = (self._source_ip, 0)
         return super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
-
 # ===========================================================
 # ロギング設定（INFO 以上: 成功 / 失敗のみ記録）
 # ===========================================================
@@ -154,20 +140,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ===========================================================
+# [Dual Reporting] New API Config (Alpha)
+# ===========================================================
+JR_API_URL_TEMPLATE = "https://leonardo-jr-api.onrender.com/api/v1/devices/{}/event"
+JR_API_TOKEN = "m0lCjXhKXBooGZ87ty_ASxbIQh0iD_MQwrYC-CVYuNU"
+JR_DEVICE_ID = "LJ-671493E4-QDSF"
+
 # テストで patch するためのモジュール名（直接実行時は "__main__"）
 _MODULE = __name__
-
-
-# ===========================================================
-# 送信結果（Phase 1.1）
-# ===========================================================
-
-SendResult = namedtuple("SendResult", ["acked", "should_queue"])
-"""
-acked:        True  = サーバ受理済み (200 duplicate / 201 accepted)
-should_queue: True  = 一時エラー → キュー保存して次回再送
-              False = 永続エラー (4xx) → キュー保存しない
-"""
 
 
 # ===========================================================
@@ -315,7 +296,7 @@ def get_bearer_info(modem_index: str) -> Optional[dict]:
 def setup_network_interface(bearer: dict) -> bool:
     ip = bearer["ip"]
     prefix = bearer["prefix"]
-
+    
     gateway = bearer["gateway"]
     # Set interface UP
     _run(["ip", "link", "set", NETWORK_INTERFACE, "up"])
@@ -370,150 +351,41 @@ def disable_modem(modem_index: str) -> None:
 
 
 # ===========================================================
-# HTTP 送信関数 (Phase 1.1)
+# HTTP 送信関数
 # ===========================================================
 
-def send_event_http(metadata: dict, wwan_ip: str) -> SendResult:
-    """
-    Phase 1.1: JSON POST で JR API にイベントを送信する。
-
-    ペイロード: DetectionEventRequest スキーマ準拠
-    認証: X-Api-Token ヘッダ
-    冪等性: event_id (UUID v7) によりサーバ側で ON CONFLICT DO NOTHING
-
-    ACK判定:
-      200, 201        → acked=True  (201=新規受理, 200=重複=既に受理済み)
-      400,401,403,422 → acked=False, should_queue=False (永続エラー、リトライしない)
-      429             → Retry-After ヘッダ尊重してリトライ
-      500,502,503,504 → acked=False, should_queue=True  (一時エラー、指数バックオフ)
-      接続エラー/Timeout → same as 5xx
-
-    Returns: SendResult(acked, should_queue)
-    """
-    device_id = metadata.get("device_id", DEVICE_ID)
-    url = JR_API_URL_TEMPLATE.format(device_id)
-
-    # DNS patch (Tailscale 干渉回避)
+def send_event_http(image_path: str, metadata: dict, wwan_ip: str) -> bool:
+    # Use SourceIPAdapter to force LTE interface
+    session = requests.Session()
+    session.mount("https://", SourceIPAdapter(wwan_ip))
+    session.mount("http://", SourceIPAdapter(wwan_ip))
+    # Resolve DNS via 8.8.8.8 to bypass Tailscale
     from urllib.parse import urlparse
-    _parsed = urlparse(url)
+    _parsed = urlparse(ENDPOINT_URL)
     _resolved = _resolve_host(_parsed.hostname)
     logger.info("DNS resolved %s -> %s", _parsed.hostname, _resolved)
-
     def _patched_gai(host, port, family=0, type=0, proto=0, flags=0):
         if host == _parsed.hostname:
             host = _resolved
         return _orig_getaddrinfo(host, port, family, type, proto, flags)
-
     socket.getaddrinfo = _patched_gai
-
-    session = requests.Session()
-    session.mount("https://", SourceIPAdapter(wwan_ip))
-    session.mount("http://", SourceIPAdapter(wwan_ip))
-
-    # Phase 1.1 ペイロード構築
-    detection_type = metadata.get("detection_type")
-    confidence = metadata.get("confidence", 0.0)
-    payload = {
-        "event_id": metadata.get("event_id"),
-        "device_id": device_id,
-        "event_type": metadata.get("event_type", "detection"),
-        "occurred_at": metadata.get("occurred_at"),
-        "detection": {
-            "class": detection_type,
-            "confidence": float(confidence),
-            "distance_estimate": None,
-        } if detection_type else None,
-        "gps": None,
-        "device_status": None,
-    }
-
+    
     try:
-        for attempt in range(MAX_RETRY):
-            headers = {
-                "X-Api-Token": API_TOKEN,
-                "Content-Type": "application/json",
-                "X-Retry-Count": str(attempt),
-            }
-            try:
-                resp = session.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=SEND_TIMEOUT_SEC,
-                )
-
-                if resp.status_code in (200, 201):
-                    logger.info(
-                        "送信成功 event_id=%s status=%d",
-                        payload["event_id"], resp.status_code,
-                    )
-                    return SendResult(acked=True, should_queue=False)
-
-                elif resp.status_code in (400, 401, 403, 422):
-                    logger.error(
-                        "永続エラー %d: リトライしない event_id=%s body=%s",
-                        resp.status_code, payload["event_id"], resp.text[:200],
-                    )
-                    return SendResult(acked=False, should_queue=False)
-
-                elif resp.status_code == 429:
-                    retry_after = int(
-                        resp.headers.get("Retry-After", BASE_RETRY_DELAY * (2 ** attempt))
-                    )
-                    logger.warning(
-                        "429 Too Many Requests: %d秒後リトライ (attempt %d/%d)",
-                        retry_after, attempt + 1, MAX_RETRY,
-                    )
-                    if attempt < MAX_RETRY - 1:
-                        time.sleep(retry_after)
-
-                elif resp.status_code in (500, 502, 503, 504):
-                    delay = BASE_RETRY_DELAY * (2 ** attempt)
-                    logger.warning(
-                        "サーバーエラー %d: %d秒後リトライ (attempt %d/%d)",
-                        resp.status_code, delay, attempt + 1, MAX_RETRY,
-                    )
-                    if attempt < MAX_RETRY - 1:
-                        time.sleep(delay)
-
-                else:
-                    logger.error(
-                        "予期しないステータス %d: キュー保存して終了", resp.status_code,
-                    )
-                    return SendResult(acked=False, should_queue=True)
-
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                delay = BASE_RETRY_DELAY * (2 ** attempt)
-                logger.warning(
-                    "通信エラー: %s — %d秒後リトライ (attempt %d/%d)",
-                    e, delay, attempt + 1, MAX_RETRY,
-                )
-                if attempt < MAX_RETRY - 1:
-                    time.sleep(delay)
-
-        logger.error("最大リトライ回数到達 (%d回): キュー保存", MAX_RETRY)
-        return SendResult(acked=False, should_queue=True)
-
-    finally:
+        with open(image_path, "rb") as f:
+            files = {"image": (Path(image_path).name, f, "image/jpeg")}
+            resp = session.post(
+                ENDPOINT_URL, 
+                files=files, 
+                data={"metadata": __import__("json").dumps(metadata)}, 
+                headers={"Authorization": f"Bearer {BEARER_TOKEN}"},
+                timeout=SEND_TIMEOUT_SEC
+            )
+            socket.getaddrinfo = _orig_getaddrinfo
+        return resp.status_code == 200
+    except Exception as e:
         socket.getaddrinfo = _orig_getaddrinfo
-
-
-# ===========================================================
-# [Dual Reporting 廃止] send_to_jr_api — Phase 1.1 で不要になったため無効化
-# 将来参照用にコードを残す
-# ===========================================================
-
-# def send_to_jr_api(metadata: dict, wwan_ip: str) -> None:
-#     """
-#     [廃止] Dual Reporting: 旧レシーバと新 JR API の両方に送信していた関数。
-#     Phase 1.1 で send_event_http が JR API に直接送信するため不要。
-#     """
-#     try:
-#         device_id = JR_DEVICE_ID
-#         url = JR_API_URL_TEMPLATE.format(device_id)
-#         ...
-#     except Exception as e:
-#         logger.error(f"JR_API: Exception {e}")
+        logger.error(f"HTTP upload failed: {e}")
+        return False
 
 
 # ===========================================================
@@ -521,21 +393,87 @@ def send_event_http(metadata: dict, wwan_ip: str) -> SendResult:
 # ===========================================================
 
 
+def send_to_jr_api(metadata: dict, wwan_ip: str) -> None:
+    """
+    [Dual Reporting] Send event metadata to the new Leonardo Jr. API.
+    Does not block or fail the main process on error.
+    """
+    try:
+        import requests
+        import socket
+        from urllib.parse import urlparse
+        
+        device_id = JR_DEVICE_ID
+        url = JR_API_URL_TEMPLATE.format(device_id)
+        
+        raw_type = metadata.get("event_type", "wildlife_detected")
+        det_type = "bear" if "wildlife" in raw_type or "bear" in raw_type else "other"
+        
+        payload = {
+            "detection_type": det_type,
+            "confidence": metadata.get("confidence", 0.0),
+            "timestamp": metadata.get("timestamp")
+        }
+        
+        logger.info(f"JR_API: Sending dual report to {url}")
+
+        session = requests.Session()
+        session.mount("https://", SourceIPAdapter(wwan_ip))
+        
+        try:
+            _parsed = urlparse(url)
+            if '_resolve_host' in globals() and '_orig_getaddrinfo' in globals():
+                _resolved = _resolve_host(_parsed.hostname)
+                def _patched_gai(host, port, family=0, type=0, proto=0, flags=0):
+                    if host == _parsed.hostname:
+                        host = _resolved
+                    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+                socket.getaddrinfo = _patched_gai
+        except Exception:
+            pass 
+
+        try:
+            resp = session.post(
+                url,
+                json=payload,
+                headers={
+                    "X-Api-Token": JR_API_TOKEN,
+                    "Content-Type": "application/json"
+                },
+                timeout=10
+            )
+            if resp.status_code in [200, 201]:
+                logger.info(f"JR_API: Success (ID: {resp.json().get('event_id')})")
+            else:
+                logger.error(f"JR_API: Failed {resp.status_code} {resp.text}")
+        finally:
+             if '_orig_getaddrinfo' in globals():
+                 socket.getaddrinfo = _orig_getaddrinfo
+
+    except Exception as e:
+        logger.error(f"JR_API: Exception {e}")
+        if '_orig_getaddrinfo' in globals():
+             socket.getaddrinfo = _orig_getaddrinfo
 def save_to_local_queue(image_path: str, metadata: dict) -> bool:
     """
     送信失敗イベントをローカルキュー（JSON ファイル）に保存する。
-    ファイル名: {queued_at_usec}_{event_id_prefix}.json
-    metadata に event_id (UUID v7) が含まれるため、再送時に同一 UUID を使用可能。
+    ファイル名: {queued_at_usec}_{event_timestamp}.json
     上限（LTE_QUEUE_MAX 件）を超えた場合、最古のファイルを削除する。
     Returns: 保存成功時 True
     """
     try:
         LTE_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
 
+        # マイクロ秒精度のタイムスタンプでファイル名衝突を回避
         queued_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
-        # event_id をファイル名に含めて追跡しやすくする
-        event_id_part = str(metadata.get("event_id", queued_ts))[:20].replace("-", "")
-        filename = f"{queued_ts}_{event_id_part}.json"
+        event_id = (
+            metadata.get("timestamp", queued_ts)
+            .replace(":", "")
+            .replace("+", "p")
+            .replace(".", "")
+            [:20]
+        )
+        filename = f"{queued_ts}_{event_id}.json"
         queue_entry = {
             "queued_at": datetime.now(timezone.utc).isoformat(),
             "image_path": image_path,
@@ -571,18 +509,12 @@ def process_local_queue(limit: int = 3, wwan_ip: str = "") -> int:
     """
     未送信キューを再送する（LTE 接続済み・ネットワーク設定済みの状態で呼ぶこと）。
     1 回の LTE セッションで処理する件数を limit で制限する（デフォルト 3 件）。
-
-    送信成功 → キューファイル削除
-    永続エラー(4xx) → キューファイル削除（再送しても無意味なため）
-    一時エラー → キューファイル保持（次回セッションに持ち越し）
-    破損 JSON → キューファイル削除してスキップ
-
-    event_id は metadata に保存済みのため、再送時も同一 UUID で冪等送信される。
-
+    送信成功したファイルは削除。画像が消えたエントリも削除（再送不能）。
+    破損した JSON ファイルは削除してスキップする。
+    limit を超えた残りキューは次回セッションに持ち越す。
     # 1件あたり: 平均300mA × 10秒 ≈ 0.83mAh（limit=3 で最大 ≈ 2.49mAh）
     Args:
-        limit   : 1回のセッションで再送する最大件数（デフォルト 3）
-        wwan_ip : wwan0 の IP アドレス（SourceIPAdapter 用）
+        limit : 1回のセッションで再送する最大件数（デフォルト 3）
     Returns: 送信成功件数
     """
     queue_files = load_local_queue()
@@ -593,21 +525,19 @@ def process_local_queue(limit: int = 3, wwan_ip: str = "") -> int:
     for qfile in target:
         try:
             entry = json.loads(qfile.read_text(encoding="utf-8"))
+            image_path = entry.get("image_path", "")
             meta = entry.get("metadata", {})
         except (json.JSONDecodeError, OSError):
             qfile.unlink(missing_ok=True)
             continue
 
-        result = send_event_http(meta, wwan_ip)
+        if not Path(image_path).exists():
+            qfile.unlink(missing_ok=True)
+            continue
 
-        if result.acked:
+        if send_event_http(image_path, meta, wwan_ip):
             qfile.unlink(missing_ok=True)
             sent_count += 1
-        elif not result.should_queue:
-            # 永続エラー(4xx): 再送しても無意味なのでキューから削除
-            logger.error("永続エラーのためキュー削除: %s", qfile.name)
-            qfile.unlink(missing_ok=True)
-        # else: 一時エラー → キューに残して次回再試行
 
     remaining = total - limit
     if remaining > 0:
@@ -622,10 +552,9 @@ def process_local_queue(limit: int = 3, wwan_ip: str = "") -> int:
 
 def send_event_with_lte(
     image_path: str,
-    event_type: str = "detection",
-    detection_type: str = "bear",
+    event_type: str = "wildlife_detected",
     confidence: float = 0.0,
-    occurred_at: Optional[str] = None,
+    timestamp: Optional[str] = None,
     inference_pause: Optional[Callable[[], None]] = None,
     inference_resume: Optional[Callable[[], None]] = None,
 ) -> bool:
@@ -633,16 +562,13 @@ def send_event_with_lte(
     検知イベント発生時の LTE 送信エントリポイント。
     いかなる例外が発生してもメインの推論ループを止めない。
 
-    UUID v7 をデバイス側で生成し、event_id として送信する（冪等性保証）。
-    image_base64 は Phase 2 で対応予定（現在は送信しない）。
-
     === 消費電力内訳（1 イベント、キュー 0 件の場合）===
     # [1] モデム検出 (mmcli -L):         約 50mA ×  1秒 ≈ 0.01mAh
     # [2] 電波強度確認 (mmcli -m):       約 50mA ×  1秒 ≈ 0.01mAh
     # [3] enable (mmcli --enable):        約200mA ×  5秒 ≈ 0.28mAh
     # [4] connect (simple-connect):       約300mA × 15秒 ≈ 1.25mAh
     # [5] Bearer 取得・ネットワーク設定: 約 50mA ×  3秒 ≈ 0.04mAh
-    # [6] HTTP POST (JSON):               約300mA × 10秒 ≈ 0.83mAh
+    # [6] HTTP POST (50KB 画像):          約300mA × 10秒 ≈ 0.83mAh
     # [7] disconnect (simple-disconnect): 約200mA ×  3秒 ≈ 0.17mAh
     # [8] disable (mmcli --disable):      約150mA ×  3秒 ≈ 0.13mAh
     # ──────────────────────────────────────────────────────────
@@ -650,34 +576,22 @@ def send_event_with_lte(
     # ← 制約 6mAh 以内（キュー limit=3 件追加でも ≈ 5.21mAh）
 
     Args:
-        image_path      : 検知画像パス（Phase 2 で使用予定、現在は保存のみ）
-        event_type      : イベント種別（デフォルト: "detection"）
-        detection_type  : 検知クラス（"bear" / "human" / "vehicle" / "unknown"）
-        confidence      : 検出信頼度 0.0–1.0
-        occurred_at     : ISO8601 タイムスタンプ（None で自動生成）
-        inference_pause : LTE 通信前に呼ぶ AI 推論停止コールバック（省略可）
-        inference_resume: LTE 通信後に呼ぶ AI 推論再開コールバック（省略可）
+        image_path       : 送信する JPEG ファイルパス（≤50KB）
+        event_type       : イベント種別（デフォルト: "wildlife_detected"）
+        confidence       : 検出信頼度 0.0–1.0
+        timestamp        : ISO8601 タイムスタンプ（None で自動生成）
+        inference_pause  : LTE 通信前に呼ぶ AI 推論停止コールバック（省略可）
+        inference_resume : LTE 通信後に呼ぶ AI 推論再開コールバック（省略可）
     Returns:
         送信成功時 True、スキップ / 失敗時 False
     """
-    # UUID v7 生成（RFC 9562 準拠、時刻単調増加でソート可能）
-    try:
-        import uuid_utils as _uuid_utils
-        event_id = _uuid_utils.uuid7()
-    except ImportError:
-        import uuid as _uuid
-        event_id = _uuid.uuid4()
-        logger.warning("uuid_utils 未インストール: uuid4 で代替 (pip install uuid_utils)")
-
-    if occurred_at is None:
-        occurred_at = datetime.now(timezone.utc).isoformat()
+    if timestamp is None:
+        timestamp = datetime.now(timezone.utc).isoformat()
 
     metadata: dict = {
-        "event_id": str(event_id),
+        "timestamp": timestamp,
         "device_id": DEVICE_ID,
         "event_type": event_type,
-        "occurred_at": occurred_at,
-        "detection_type": detection_type,
         "confidence": round(float(confidence), 4),
     }
 
@@ -692,11 +606,12 @@ def send_event_with_lte(
             return False
 
         # [2] 電波強度チェック（disable 状態のキャッシュ値を使用）
+        # # 電波強度チェック: 約50mA × 1秒 ≈ 0.01mAh
         # 0% は disable 直後の不明値のためスキップ判定から除外する
         signal = get_signal_quality(modem_index)
         if signal is not None and signal > 0 and signal <= SIGNAL_SKIP_THRESHOLD:
             logger.warning(
-                "電波強度 %d%% <= %d%%: キュー保存してスキップ",
+                "電波強度 %d%% ≤ %d%%: キュー保存してスキップ",
                 signal, SIGNAL_SKIP_THRESHOLD,
             )
             save_to_local_queue(image_path, metadata)
@@ -707,6 +622,7 @@ def send_event_with_lte(
             inference_pause()
 
         # [4] モデム enable
+        # # enable → connect サイクル: 平均300mA × 20秒 ≈ 1.67mAh
         if not enable_modem(modem_index):
             logger.error("モデム enable 失敗: キュー保存して終了")
             save_to_local_queue(image_path, metadata)
@@ -732,30 +648,25 @@ def send_event_with_lte(
             return False
 
         # [7] 未送信キューを先に再送（最大 limit=3 件）
+        # # キュー再送: 平均300mA × 10秒 × 件数 ≈ 0.83mAh/件
         pending = load_local_queue()
         if pending:
             sent = process_local_queue(wwan_ip=bearer["ip"])
             logger.info("キュー再送: %d 件成功（キュー残: %d 件）", sent, len(pending) - sent)
 
-        # [8] 本イベント送信（event_id は metadata に含まれる）
-        result = send_event_http(metadata, bearer["ip"])
+        # [8] 本イベント送信
+        # # HTTP POST: 平均300mA × 10秒 ≈ 0.83mAh
+        success = send_event_http(image_path, metadata, bearer["ip"])
 
-        if result.acked:
-            logger.info(
-                "送信成功: event_id=%s detection_type=%s confidence=%.2f",
-                metadata["event_id"], detection_type, confidence,
-            )
-            return True
-        elif result.should_queue:
-            logger.error("送信失敗（一時エラー）: キュー保存")
-            save_to_local_queue(image_path, metadata)
-            return False
+        # [8b] Dual Report to New API (Fire and Forget)
+        send_to_jr_api(metadata, bearer["ip"])
+        if success:
+            logger.info("送信成功: %s (confidence=%.2f)", event_type, confidence)
         else:
-            logger.error(
-                "送信失敗（永続エラー）: event_id=%s キュー保存しない",
-                metadata["event_id"],
-            )
-            return False
+            logger.error("送信失敗: キュー保存")
+            save_to_local_queue(image_path, metadata)
+
+        return success
 
     except Exception as e:  # pylint: disable=broad-except
         # いかなる例外もメイン推論ループを止めない
@@ -768,6 +679,7 @@ def send_event_with_lte(
 
     finally:
         # [9] 切断・disable・ネットワーク削除（常に実行）
+        # # disconnect + disable + teardown: 平均175mA × 8秒 ≈ 0.39mAh
         if modem_index is not None:
             disconnect_lte(modem_index)
             disable_modem(modem_index)
@@ -863,23 +775,18 @@ def _run_tests() -> None:
 
         def test_save_and_load_queue(self) -> None:
             test_queue = self.tmpdir / "queue"
-            meta = {
-                "event_id": "019cb000-0000-7000-0000-000000000001",
-                "occurred_at": "2024-01-01T00:00:00+00:00",
-                "device_id": DEVICE_ID,
-            }
+            meta = {"timestamp": "2024-01-01T00:00:00+00:00", "device_id": "test"}
             with patch(f"{MOD}.LTE_QUEUE_DIR", test_queue):
                 self.assertTrue(save_to_local_queue(self.image_path, meta))
                 files = load_local_queue()
                 self.assertEqual(len(files), 1)
                 entry = json.loads(files[0].read_text())
                 self.assertEqual(entry["image_path"], self.image_path)
-                # event_id がキュー内に保存されていることを確認
-                self.assertEqual(entry["metadata"]["event_id"], meta["event_id"])
+                self.assertEqual(entry["metadata"]["timestamp"], meta["timestamp"])
 
         def test_queue_max_limit_deletes_oldest(self) -> None:
             test_queue = self.tmpdir / "queue"
-            meta = {"event_id": "019cb000-0000-7000-0000-000000000001"}
+            meta = {"timestamp": "2024-01-01T00:00:00+00:00"}
             with patch(f"{MOD}.LTE_QUEUE_DIR", test_queue), \
                  patch(f"{MOD}.LTE_QUEUE_MAX", 3):
                 for _ in range(5):
@@ -892,14 +799,7 @@ def _run_tests() -> None:
         def _make_queue_files(self, count: int) -> Path:
             """テスト用キューディレクトリに count 件のエントリを作成する"""
             test_queue = self.tmpdir / "queue"
-            meta = {
-                "event_id": "019cb000-0000-7000-0000-000000000001",
-                "device_id": DEVICE_ID,
-                "event_type": "detection",
-                "occurred_at": "2024-01-01T00:00:00+00:00",
-                "detection_type": "bear",
-                "confidence": 0.9,
-            }
+            meta = {"timestamp": "2024-01-01T00:00:00+00:00"}
             with patch(f"{MOD}.LTE_QUEUE_DIR", test_queue):
                 for _ in range(count):
                     time.sleep(0.005)
@@ -909,9 +809,8 @@ def _run_tests() -> None:
         def test_process_local_queue_respects_limit(self) -> None:
             """limit=2 のとき 2 件しか処理しない"""
             test_queue = self._make_queue_files(5)
-            ok = SendResult(acked=True, should_queue=False)
             with patch(f"{MOD}.LTE_QUEUE_DIR", test_queue), \
-                 patch(f"{MOD}.send_event_http", return_value=ok):
+                 patch(f"{MOD}.send_event_http", return_value=True):
                 sent = process_local_queue(limit=2)
             self.assertEqual(sent, 2)
             # 残り 3 件がキューに残っている
@@ -920,9 +819,8 @@ def _run_tests() -> None:
         def test_process_local_queue_warns_remaining(self) -> None:
             """limit より多くのキューがある場合に warning を出す"""
             test_queue = self._make_queue_files(5)
-            ok = SendResult(acked=True, should_queue=False)
             with patch(f"{MOD}.LTE_QUEUE_DIR", test_queue), \
-                 patch(f"{MOD}.send_event_http", return_value=ok), \
+                 patch(f"{MOD}.send_event_http", return_value=True), \
                  self.assertLogs(level="WARNING") as log_ctx:
                 process_local_queue(limit=3)
             self.assertTrue(
@@ -932,9 +830,9 @@ def _run_tests() -> None:
         def test_process_local_queue_no_warning_within_limit(self) -> None:
             """キュー件数が limit 以下なら warning を出さない"""
             test_queue = self._make_queue_files(2)
-            ok = SendResult(acked=True, should_queue=False)
             with patch(f"{MOD}.LTE_QUEUE_DIR", test_queue), \
-                 patch(f"{MOD}.send_event_http", return_value=ok):
+                 patch(f"{MOD}.send_event_http", return_value=True):
+                import logging as _logging
                 with self.assertRaises(AssertionError):
                     with self.assertLogs(level="WARNING"):
                         process_local_queue(limit=3)
@@ -942,225 +840,81 @@ def _run_tests() -> None:
         def test_process_local_queue_default_limit_3(self) -> None:
             """デフォルト limit=3 で 3 件を処理する"""
             test_queue = self._make_queue_files(5)
-            ok = SendResult(acked=True, should_queue=False)
             with patch(f"{MOD}.LTE_QUEUE_DIR", test_queue), \
-                 patch(f"{MOD}.send_event_http", return_value=ok):
-                sent = process_local_queue(wwan_ip="10.0.0.1")  # limit=3 がデフォルト
+                 patch(f"{MOD}.send_event_http", return_value=True):
+                sent = process_local_queue(wwan_ip=bearer["ip"])  # limit=3 がデフォルト
             self.assertEqual(sent, 3)
 
-        def test_process_local_queue_permanent_error_deletes_entry(self) -> None:
-            """永続エラー(4xx) のエントリはキューから削除される"""
-            test_queue = self._make_queue_files(2)
-            perm_err = SendResult(acked=False, should_queue=False)
-            with patch(f"{MOD}.LTE_QUEUE_DIR", test_queue), \
-                 patch(f"{MOD}.send_event_http", return_value=perm_err):
-                sent = process_local_queue(limit=2)
-            self.assertEqual(sent, 0)
-            # 永続エラーなのでキューから削除されている
-            self.assertEqual(len(sorted(test_queue.glob("*.json"))), 0)
-
-        def test_process_local_queue_temp_error_keeps_entry(self) -> None:
-            """一時エラーのエントリはキューに残る"""
-            test_queue = self._make_queue_files(2)
-            temp_err = SendResult(acked=False, should_queue=True)
-            with patch(f"{MOD}.LTE_QUEUE_DIR", test_queue), \
-                 patch(f"{MOD}.send_event_http", return_value=temp_err):
-                sent = process_local_queue(limit=2)
-            self.assertEqual(sent, 0)
-            # 一時エラーなのでキューに残っている
-            self.assertEqual(len(sorted(test_queue.glob("*.json"))), 2)
-
-        def test_process_local_queue_skips_corrupt_json(self) -> None:
-            """破損 JSON は削除してスキップ"""
+        def test_process_local_queue_skips_missing_image(self) -> None:
+            """画像が消えたエントリは削除してスキップ"""
             test_queue = self.tmpdir / "queue"
             test_queue.mkdir()
-            (test_queue / "20240101T000000000000_corrupt.json").write_text(
-                "{ invalid json", encoding="utf-8"
+            # 存在しない画像パスのエントリを直接作成
+            entry = {
+                "queued_at": "2024-01-01T00:00:00+00:00",
+                "image_path": "/nonexistent/ghost.jpg",
+                "metadata": {},
+            }
+            (test_queue / "20240101T000000000000_test.json").write_text(
+                json.dumps(entry), encoding="utf-8"
             )
             with patch(f"{MOD}.LTE_QUEUE_DIR", test_queue):
                 sent = process_local_queue(limit=3)
             self.assertEqual(sent, 0)
+            # エントリが削除されている
             self.assertEqual(len(list(test_queue.glob("*.json"))), 0)
 
         # ── send_event_http ──────────────────────────────────
 
-        def _make_meta(self, event_id: str = "019cb000-0000-7000-0000-000000000001") -> dict:
-            return {
-                "event_id": event_id,
-                "device_id": DEVICE_ID,
-                "event_type": "detection",
-                "occurred_at": "2024-01-01T00:00:00+00:00",
-                "detection_type": "bear",
-                "confidence": 0.92,
-            }
+        def test_http_success_200(self) -> None:
+            with patch("requests.post") as m:
+                m.return_value = MagicMock(status_code=200)
+                self.assertTrue(send_event_http(self.image_path, {"timestamp": "T"}, "127.0.0.1"))
 
         def test_http_success_201(self) -> None:
-            """201 → acked=True, should_queue=False"""
-            with patch("requests.Session") as MockSession:
-                MockSession.return_value.post.return_value = MagicMock(
-                    status_code=201, headers={}, text=""
-                )
-                result = send_event_http(self._make_meta(), "10.0.0.1")
-            self.assertTrue(result.acked)
-            self.assertFalse(result.should_queue)
+            with patch("requests.post") as m:
+                m.return_value = MagicMock(status_code=201)
+                self.assertTrue(send_event_http(self.image_path, {}, "127.0.0.1"))
 
-        def test_http_success_200_duplicate(self) -> None:
-            """200 (重複) → acked=True, should_queue=False"""
-            with patch("requests.Session") as MockSession:
-                MockSession.return_value.post.return_value = MagicMock(
-                    status_code=200, headers={}, text=""
-                )
-                result = send_event_http(self._make_meta(), "10.0.0.1")
-            self.assertTrue(result.acked)
-            self.assertFalse(result.should_queue)
-
-        def test_http_permanent_4xx_no_retry(self) -> None:
-            """400/401/403/422 → acked=False, should_queue=False, リトライしない"""
-            for code in (400, 401, 403, 422):
-                with patch("requests.Session") as MockSession:
-                    MockSession.return_value.post.return_value = MagicMock(
-                        status_code=code, headers={}, text="error"
-                    )
-                    result = send_event_http(self._make_meta(), "10.0.0.1")
-                    self.assertFalse(result.acked, f"code={code}")
-                    self.assertFalse(result.should_queue, f"code={code}")
-                    self.assertEqual(
-                        MockSession.return_value.post.call_count, 1,
-                        f"code={code} should not retry"
-                    )
-
-        def test_http_5xx_retries_then_success(self) -> None:
-            """500 → リトライ → 201 成功"""
-            with patch("requests.Session") as MockSession, patch("time.sleep"):
-                MockSession.return_value.post.side_effect = [
-                    MagicMock(status_code=500, headers={}, text="err"),
-                    MagicMock(status_code=201, headers={}, text=""),
-                ]
-                result = send_event_http(self._make_meta(), "10.0.0.1")
-            self.assertTrue(result.acked)
-            self.assertEqual(MockSession.return_value.post.call_count, 2)
-
-        def test_http_5xx_max_retry_exceeded(self) -> None:
-            """5xx が MAX_RETRY 回続いたら should_queue=True"""
-            with patch("requests.Session") as MockSession, patch("time.sleep"):
-                MockSession.return_value.post.return_value = MagicMock(
-                    status_code=503, headers={}, text="err"
-                )
-                result = send_event_http(self._make_meta(), "10.0.0.1")
-            self.assertFalse(result.acked)
-            self.assertTrue(result.should_queue)
-            self.assertEqual(MockSession.return_value.post.call_count, MAX_RETRY)
-
-        def test_http_429_respects_retry_after(self) -> None:
-            """429 → Retry-After ヘッダを読んで sleep → 201 成功"""
-            with patch("requests.Session") as MockSession, patch("time.sleep") as mock_sleep:
-                MockSession.return_value.post.side_effect = [
-                    MagicMock(status_code=429, headers={"Retry-After": "5"}, text=""),
-                    MagicMock(status_code=201, headers={}, text=""),
-                ]
-                result = send_event_http(self._make_meta(), "10.0.0.1")
-            self.assertTrue(result.acked)
-            mock_sleep.assert_called_once_with(5)
+        def test_http_4xx_no_retry(self) -> None:
+            with patch("requests.post") as m:
+                m.return_value = MagicMock(status_code=401)
+                self.assertFalse(send_event_http(self.image_path, {}, "127.0.0.1"))
+                self.assertEqual(m.call_count, 1)
 
         def test_http_connection_error_retry_then_success(self) -> None:
-            """ConnectionError → リトライ → 201 成功"""
-            with patch("requests.Session") as MockSession, patch("time.sleep"):
-                MockSession.return_value.post.side_effect = [
+            with patch("requests.post") as m, patch("time.sleep"):
+                m.side_effect = [
                     requests.exceptions.ConnectionError(),
-                    MagicMock(status_code=201, headers={}, text=""),
+                    MagicMock(status_code=200),
                 ]
-                result = send_event_http(self._make_meta(), "10.0.0.1")
-            self.assertTrue(result.acked)
-            self.assertEqual(MockSession.return_value.post.call_count, 2)
+                self.assertTrue(send_event_http(self.image_path, {}, "127.0.0.1"))
+                self.assertEqual(m.call_count, 2)
 
         def test_http_timeout_retry_then_success(self) -> None:
-            """Timeout → リトライ → 201 成功"""
-            with patch("requests.Session") as MockSession, patch("time.sleep"):
-                MockSession.return_value.post.side_effect = [
+            with patch("requests.post") as m, patch("time.sleep"):
+                m.side_effect = [
                     requests.exceptions.Timeout(),
-                    MagicMock(status_code=201, headers={}, text=""),
+                    MagicMock(status_code=200),
                 ]
-                result = send_event_http(self._make_meta(), "10.0.0.1")
-            self.assertTrue(result.acked)
+                self.assertTrue(send_event_http(self.image_path, {}, "127.0.0.1"))
+                self.assertEqual(m.call_count, 2)
 
-        def test_http_connection_error_max_retry(self) -> None:
-            """ConnectionError が MAX_RETRY 回 → should_queue=True"""
-            with patch("requests.Session") as MockSession, patch("time.sleep"):
-                MockSession.return_value.post.side_effect = requests.exceptions.ConnectionError()
-                result = send_event_http(self._make_meta(), "10.0.0.1")
-            self.assertFalse(result.acked)
-            self.assertTrue(result.should_queue)
-            self.assertEqual(MockSession.return_value.post.call_count, MAX_RETRY)
+        def test_http_max_retry_exceeded(self) -> None:
+            with patch("requests.post") as m, patch("time.sleep"):
+                m.side_effect = requests.exceptions.ConnectionError()
+                self.assertFalse(send_event_http(self.image_path, {}, "127.0.0.1"))
+                self.assertEqual(m.call_count, MAX_RETRY)
 
-        def test_http_payload_schema(self) -> None:
-            """ペイロードが Phase 1.1 スキーマ準拠かチェック"""
-            captured = {}
-
-            def fake_post(url, json=None, headers=None, timeout=None):
-                captured["payload"] = json
-                captured["headers"] = headers
-                return MagicMock(status_code=201, headers={}, text="")
-
-            with patch("requests.Session") as MockSession:
-                MockSession.return_value.post.side_effect = fake_post
-                send_event_http(self._make_meta("019cb000-0000-7001-0000-000000000002"), "10.0.0.1")
-
-            p = captured["payload"]
-            self.assertEqual(p["event_id"], "019cb000-0000-7001-0000-000000000002")
-            self.assertEqual(p["device_id"], DEVICE_ID)
-            self.assertEqual(p["event_type"], "detection")
-            self.assertIn("occurred_at", p)
-            self.assertIsNotNone(p["detection"])
-            self.assertEqual(p["detection"]["class"], "bear")
-            self.assertAlmostEqual(p["detection"]["confidence"], 0.92)
-            self.assertIsNone(p["gps"])
-            self.assertIsNone(p["device_status"])
-
-        def test_http_x_retry_count_header(self) -> None:
-            """X-Retry-Count ヘッダが attempt 番号で送信されること"""
-            captured_headers = []
-
-            def fake_post(url, json=None, headers=None, timeout=None):
-                captured_headers.append(headers.get("X-Retry-Count"))
-                return MagicMock(status_code=503, headers={}, text="err")
-
-            with patch("requests.Session") as MockSession, patch("time.sleep"):
-                MockSession.return_value.post.side_effect = fake_post
-                send_event_http(self._make_meta(), "10.0.0.1")
-
-            self.assertEqual(captured_headers, ["0", "1", "2"])
-
-        def test_http_x_api_token_header(self) -> None:
-            """X-Api-Token ヘッダが正しく送信されること"""
-            captured = {}
-
-            def fake_post(url, json=None, headers=None, timeout=None):
-                captured["headers"] = headers
-                return MagicMock(status_code=201, headers={}, text="")
-
-            with patch("requests.Session") as MockSession:
-                MockSession.return_value.post.side_effect = fake_post
-                send_event_http(self._make_meta(), "10.0.0.1")
-
-            self.assertEqual(captured["headers"]["X-Api-Token"], API_TOKEN)
-            self.assertEqual(captured["headers"]["Content-Type"], "application/json")
+        def test_http_missing_image_no_retry(self) -> None:
+            self.assertFalse(send_event_http("/nonexistent/path.jpg", {}, "127.0.0.1"))
 
         # ── send_event_with_lte フルフロー ──────────────────
 
         def _bearer(self) -> dict:
             return {"ip": "10.0.0.1", "prefix": "28", "gateway": "10.0.0.14"}
 
-        def _ok_result(self) -> SendResult:
-            return SendResult(acked=True, should_queue=False)
-
-        def _fail_result(self) -> SendResult:
-            return SendResult(acked=False, should_queue=True)
-
-        def _perm_err_result(self) -> SendResult:
-            return SendResult(acked=False, should_queue=False)
-
         def test_full_flow_success(self) -> None:
-            """正常フロー: 送信成功 → True を返す"""
             with patch(f"{MOD}.get_modem_index", return_value="0"), \
                  patch(f"{MOD}.get_signal_quality", return_value=80), \
                  patch(f"{MOD}.enable_modem", return_value=True), \
@@ -1168,77 +922,16 @@ def _run_tests() -> None:
                  patch(f"{MOD}.get_bearer_info", return_value=self._bearer()), \
                  patch(f"{MOD}.setup_network_interface", return_value=True), \
                  patch(f"{MOD}.load_local_queue", return_value=[]), \
-                 patch(f"{MOD}.send_event_http", return_value=self._ok_result()), \
+                 patch(f"{MOD}.send_event_http", return_value=True), \
                  patch(f"{MOD}.disconnect_lte"), \
                  patch(f"{MOD}.disable_modem"), \
                  patch(f"{MOD}.teardown_network_interface"):
                 self.assertTrue(
-                    send_event_with_lte(self.image_path, detection_type="bear", confidence=0.95)
+                    send_event_with_lte(self.image_path, confidence=0.95)
                 )
 
-        def test_full_flow_event_id_in_metadata(self) -> None:
-            """send_event_http に渡される metadata に event_id が含まれること"""
-            captured = {}
-
-            def fake_http(meta, wwan_ip):
-                captured["meta"] = meta
-                return SendResult(acked=True, should_queue=False)
-
-            with patch(f"{MOD}.get_modem_index", return_value="0"), \
-                 patch(f"{MOD}.get_signal_quality", return_value=80), \
-                 patch(f"{MOD}.enable_modem", return_value=True), \
-                 patch(f"{MOD}.connect_lte", return_value=True), \
-                 patch(f"{MOD}.get_bearer_info", return_value=self._bearer()), \
-                 patch(f"{MOD}.setup_network_interface", return_value=True), \
-                 patch(f"{MOD}.load_local_queue", return_value=[]), \
-                 patch(f"{MOD}.send_event_http", side_effect=fake_http), \
-                 patch(f"{MOD}.disconnect_lte"), \
-                 patch(f"{MOD}.disable_modem"), \
-                 patch(f"{MOD}.teardown_network_interface"):
-                send_event_with_lte(self.image_path, detection_type="bear", confidence=0.9)
-
-            self.assertIn("event_id", captured["meta"])
-            self.assertEqual(captured["meta"]["device_id"], DEVICE_ID)
-            self.assertEqual(captured["meta"]["detection_type"], "bear")
-            self.assertEqual(captured["meta"]["event_type"], "detection")
-            self.assertIn("occurred_at", captured["meta"])
-
-        def test_full_flow_temp_error_saves_queue(self) -> None:
-            """一時エラー → キュー保存 → False を返す"""
-            with patch(f"{MOD}.get_modem_index", return_value="0"), \
-                 patch(f"{MOD}.get_signal_quality", return_value=80), \
-                 patch(f"{MOD}.enable_modem", return_value=True), \
-                 patch(f"{MOD}.connect_lte", return_value=True), \
-                 patch(f"{MOD}.get_bearer_info", return_value=self._bearer()), \
-                 patch(f"{MOD}.setup_network_interface", return_value=True), \
-                 patch(f"{MOD}.load_local_queue", return_value=[]), \
-                 patch(f"{MOD}.send_event_http", return_value=self._fail_result()), \
-                 patch(f"{MOD}.save_to_local_queue", return_value=True) as mock_save, \
-                 patch(f"{MOD}.disconnect_lte"), \
-                 patch(f"{MOD}.disable_modem"), \
-                 patch(f"{MOD}.teardown_network_interface"):
-                self.assertFalse(send_event_with_lte(self.image_path))
-                mock_save.assert_called_once()
-
-        def test_full_flow_permanent_error_no_queue(self) -> None:
-            """永続エラー(4xx) → キュー保存しない → False を返す"""
-            with patch(f"{MOD}.get_modem_index", return_value="0"), \
-                 patch(f"{MOD}.get_signal_quality", return_value=80), \
-                 patch(f"{MOD}.enable_modem", return_value=True), \
-                 patch(f"{MOD}.connect_lte", return_value=True), \
-                 patch(f"{MOD}.get_bearer_info", return_value=self._bearer()), \
-                 patch(f"{MOD}.setup_network_interface", return_value=True), \
-                 patch(f"{MOD}.load_local_queue", return_value=[]), \
-                 patch(f"{MOD}.send_event_http", return_value=self._perm_err_result()), \
-                 patch(f"{MOD}.save_to_local_queue", return_value=True) as mock_save, \
-                 patch(f"{MOD}.disconnect_lte"), \
-                 patch(f"{MOD}.disable_modem"), \
-                 patch(f"{MOD}.teardown_network_interface"):
-                self.assertFalse(send_event_with_lte(self.image_path))
-                mock_save.assert_not_called()
-
         def test_full_flow_low_signal_saves_queue(self) -> None:
-            """電波強度 30%（1–40% 範囲）でスキップ → キュー保存"""
+            """電波強度 30%（1–40% 範囲）でスキップ→キュー保存"""
             with patch(f"{MOD}.get_modem_index", return_value="0"), \
                  patch(f"{MOD}.get_signal_quality", return_value=30), \
                  patch(f"{MOD}.save_to_local_queue", return_value=True) as mock_save, \
@@ -1255,11 +948,12 @@ def _run_tests() -> None:
                  patch(f"{MOD}.teardown_network_interface"), \
                  patch(f"{MOD}.disconnect_lte"), \
                  patch(f"{MOD}.disable_modem"):
+                # enable が失敗することでキュー保存されるが、スキップ理由ではない
                 self.assertFalse(send_event_with_lte(self.image_path))
                 mock_save.assert_called_once()
 
         def test_full_flow_none_signal_does_not_skip(self) -> None:
-            """電波強度が取得できない場合（None）はスキップしない"""
+            """電波強度が取得できない場合（None）はスキップしない → enable まで進む"""
             with patch(f"{MOD}.get_modem_index", return_value="0"), \
                  patch(f"{MOD}.get_signal_quality", return_value=None), \
                  patch(f"{MOD}.enable_modem", return_value=True), \
@@ -1267,7 +961,7 @@ def _run_tests() -> None:
                  patch(f"{MOD}.get_bearer_info", return_value=self._bearer()), \
                  patch(f"{MOD}.setup_network_interface", return_value=True), \
                  patch(f"{MOD}.load_local_queue", return_value=[]), \
-                 patch(f"{MOD}.send_event_http", return_value=self._ok_result()), \
+                 patch(f"{MOD}.send_event_http", return_value=True), \
                  patch(f"{MOD}.disconnect_lte"), \
                  patch(f"{MOD}.disable_modem"), \
                  patch(f"{MOD}.teardown_network_interface"):
@@ -1300,6 +994,22 @@ def _run_tests() -> None:
                  patch(f"{MOD}.teardown_network_interface"), \
                  patch(f"{MOD}.disconnect_lte"), \
                  patch(f"{MOD}.disable_modem"):
+                self.assertFalse(send_event_with_lte(self.image_path))
+                mock_save.assert_called_once()
+
+        def test_full_flow_http_fail_saves_queue(self) -> None:
+            with patch(f"{MOD}.get_modem_index", return_value="0"), \
+                 patch(f"{MOD}.get_signal_quality", return_value=80), \
+                 patch(f"{MOD}.enable_modem", return_value=True), \
+                 patch(f"{MOD}.connect_lte", return_value=True), \
+                 patch(f"{MOD}.get_bearer_info", return_value=self._bearer()), \
+                 patch(f"{MOD}.setup_network_interface", return_value=True), \
+                 patch(f"{MOD}.load_local_queue", return_value=[]), \
+                 patch(f"{MOD}.send_event_http", return_value=False), \
+                 patch(f"{MOD}.save_to_local_queue", return_value=True) as mock_save, \
+                 patch(f"{MOD}.disconnect_lte"), \
+                 patch(f"{MOD}.disable_modem"), \
+                 patch(f"{MOD}.teardown_network_interface"):
                 self.assertFalse(send_event_with_lte(self.image_path))
                 mock_save.assert_called_once()
 
@@ -1354,7 +1064,7 @@ def _run_tests() -> None:
                  patch(f"{MOD}.get_bearer_info", return_value=self._bearer()), \
                  patch(f"{MOD}.setup_network_interface", return_value=True), \
                  patch(f"{MOD}.load_local_queue", return_value=[]), \
-                 patch(f"{MOD}.send_event_http", return_value=self._ok_result()), \
+                 patch(f"{MOD}.send_event_http", return_value=True), \
                  patch(f"{MOD}.disconnect_lte"), \
                  patch(f"{MOD}.disable_modem"), \
                  patch(f"{MOD}.teardown_network_interface"):
@@ -1413,10 +1123,18 @@ def main() -> None:
     メイン推論ループからの呼び出し例:
         from lte_sender import send_event_with_lte
 
+        # AI 推論の停止・再開コールバックを渡す例
+        def pause_inference():
+            # 例: カメラ取得・推論スレッドを一時停止する処理
+            pass
+
+        def resume_inference():
+            # 例: カメラ取得・推論スレッドを再開する処理
+            pass
+
         success = send_event_with_lte(
             image_path="/tmp/captured.jpg",
-            event_type="detection",
-            detection_type="bear",
+            event_type="wildlife_detected",
             confidence=0.92,
             inference_pause=pause_inference,
             inference_resume=resume_inference,
@@ -1437,8 +1155,7 @@ def main() -> None:
     print("LTE 送信開始...")
     success = send_event_with_lte(
         image_path=image_file,
-        event_type="detection",
-        detection_type="bear",
+        event_type="wildlife_detected",
         confidence=0.87,
     )
     status = "送信成功" if success else "送信失敗（ローカルキュー保存済み）"
@@ -1447,3 +1164,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

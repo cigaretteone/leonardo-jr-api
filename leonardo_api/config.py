@@ -66,3 +66,11 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+MEDIA_STORAGE_PATH = "/data/media"
+THUMBNAIL_SUBDIR = "thumbnails"
+VIDEO_SUBDIR = "videos"
+MAX_THUMBNAIL_SIZE = 200_000
+MAX_VIDEO_SIZE = 5 * 1024 * 1024
+VIDEO_UPLOAD_TIMEOUT = 60
+VIDEO_REQUEST_POLICY = "always"

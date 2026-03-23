@@ -217,3 +217,37 @@ class ActiveLocation(BaseModel):
 class DeviceStatusResponse(BaseModel):
     status: str
     active_location: ActiveLocation | None
+
+class EventResponseV2(BaseModel):
+    status: str
+    event_id: UUID
+    video_requested: bool = False
+    upload_url: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class VideoUploadResponse(BaseModel):
+    status: str
+    media_id: Optional[UUID] = None
+    class Config:
+        from_attributes = True
+
+class VideoUploadError(BaseModel):
+    error: str
+    detail: Optional[str] = None
+    max_bytes: Optional[int] = None
+
+class MediaInfo(BaseModel):
+    media_id: UUID
+    event_id: UUID
+    media_type: str
+    upload_status: str
+    codec: Optional[str] = None
+    resolution: Optional[str] = None
+    duration_sec: Optional[float] = None
+    file_size_bytes: Optional[int] = None
+    sha256_hash: Optional[str] = None
+    uploaded_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    class Config:
+        from_attributes = True
