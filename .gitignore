@@ -9,9 +9,24 @@ build/
 venv/
 env/
 
-# 環境変数（秘密情報を含むため絶対にコミットしない）
+# Secrets
 .env
 *.env
+
+# Backups
+*.bak
+*.bak2
+*.bak_*
+
+# Migration/fix scripts (one-off, not part of app)
+run_migration_*.py
+migration_*.py
+add_event_columns.py
+check_count.py
+fix_*.py
+show_models.py
+test_crud_*.py
+lte_sender.py.bak*
 
 # pytest
 .pytest_cache/
@@ -22,11 +37,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# エディタ
+# Editor
 .vscode/
 .idea/
 
-# デバイス側の生成物（実機では /etc/leonardo/ に配置）
-device/scripts/__pycache__/
-*.bak_*
+# Alembic
 alembic.ini.save
