@@ -74,3 +74,4 @@ MAX_THUMBNAIL_SIZE = 200_000
 MAX_VIDEO_SIZE = 5 * 1024 * 1024
 VIDEO_UPLOAD_TIMEOUT = 60
 VIDEO_REQUEST_POLICY = "always"
+API_BASE_URL = "https://leonardo-jr-api.onrender.com"

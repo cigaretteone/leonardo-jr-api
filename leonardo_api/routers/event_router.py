@@ -12,7 +12,7 @@ NOTE: エンドポイントURLは移行互換のため /{device_id}/event を維
 import logging
 from datetime import datetime, timezone
 from typing import Annotated
-
+from ..config import API_BASE_URL
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.dialects.postgresql import insert
@@ -245,7 +245,7 @@ async def receive_event(
         logger.error("Notification error: %s", exc)
 
     # ── 201 Created (Phase 2.1: video_requested追加) ──
-    upload_url = f"/api/v1/devices/{device_id}/events/{body.event_id}/video"
+    upload_url = f"{API_BASE_URL}/api/v1/devices/{device_id}/events/{body.event_id}/video"
     return JSONResponse(
         status_code=201,
         content={
