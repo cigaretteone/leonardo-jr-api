@@ -260,6 +260,64 @@ async def receive_event(
         },
     )
 
+# =============================================================================
+# GET /{device_id}/events — Phase 2.4: Event listing for dashboard
+# =============================================================================
+
+@router.get(
+    "/{device_id}/events",
+    summary="Detection events list",
+    status_code=status.HTTP_200_OK,
+)
+async def list_events(
+    device_id: str,
+    device: Annotated[Device, Depends(get_device_by_api_token)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = 50,
+):
+    if device.device_id != device_id:
+        raise HTTPException(status_code=400, detail="device_id mismatch")
+
+    from sqlalchemy import select
+    from ..models import DetectionEvent, EventMedia
+
+    stmt = (
+        select(DetectionEvent)
+        .where(DetectionEvent.device_id == device_id)
+        .order_by(DetectionEvent.occurred_at.desc())
+        .limit(min(limit, 100))
+    )
+    result = await db.execute(stmt)
+    events = result.scalars().all()
+
+    out = []
+    for ev in events:
+        media_stmt = select(EventMedia).where(EventMedia.event_id == ev.event_id)
+        media_result = await db.execute(media_stmt)
+        media_rows = media_result.scalars().all()
+
+        media_list = []
+        for m in media_rows:
+            media_list.append({
+                "media_type": m.media_type,
+                "upload_status": m.upload_status,
+                "codec": m.codec,
+                "file_size_bytes": m.file_size_bytes,
+            })
+
+        out.append({
+            "event_id": str(ev.event_id),
+            "device_id": ev.device_id,
+            "event_type": ev.event_type,
+            "detection_type": ev.detection_type,
+            "confidence": float(ev.confidence) if ev.confidence else None,
+            "occurred_at": ev.occurred_at.isoformat() if ev.occurred_at else None,
+            "received_at": ev.received_at.isoformat() if ev.received_at else None,
+            "location_mismatch": ev.location_mismatch,
+            "media": media_list,
+        })
+
+    return {"events": out, "count": len(out)}
 
 # =============================================================================
 # GET /{device_id}/status (変更なし)

@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Leonardo Jr. Events Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0e17;--surface:#111827;--surface2:#1a2236;--border:#1e2d45;--accent:#22d3ee;--green:#34d399;--amber:#fbbf24;--red:#f87171;--text:#e2e8f0;--text2:#94a3b8;--mono:'JetBrains Mono',monospace;--sans:'DM Sans',sans-serif}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh}
+.header{background:linear-gradient(135deg,#0f172a,#1e293b);border-bottom:1px solid var(--border);padding:1.2rem 2rem;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.header h1{font-family:var(--mono);font-size:1.3rem;font-weight:700;color:var(--accent)}
+.header h1 span{color:var(--text2);font-weight:400}
+.status-bar{display:flex;gap:1.5rem;align-items:center;font-family:var(--mono);font-size:.8rem;color:var(--text2)}
+.dot{width:8px;height:8px;background:var(--green);border-radius:50%;display:inline-block;animation:p 2s ease-in-out infinite}
+@keyframes p{0%,100%{opacity:1}50%{opacity:.4}}
+.content{max-width:1400px;margin:0 auto;padding:1.5rem 2rem}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.8rem;margin-bottom:1.5rem}
+.sc{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1rem}
+.sc .lb{font-size:.7rem;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;font-family:var(--mono)}
+.sc .vl{font-size:1.5rem;font-weight:700;font-family:var(--mono);margin-top:.2rem}
+.el{display:flex;flex-direction:column;gap:.8rem}
+.ec{background:var(--surface);border:1px solid var(--border);border-radius:10px;display:flex;overflow:hidden;transition:border-color .2s}
+.ec:hover{border-color:#06b6d4}
+.et{width:160px;min-height:120px;background:var(--surface2);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden}
+.et img{width:100%;height:100%;object-fit:cover}
+.ni{font-family:var(--mono);font-size:.7rem;color:var(--text2);text-align:center;padding:.5rem}
+.eb{padding:1rem;flex:1;display:flex;flex-direction:column;gap:.4rem}
+.etype{font-family:var(--mono);font-size:.82rem;font-weight:700;display:flex;align-items:center;gap:.5rem}
+.db{padding:.15rem .5rem;border-radius:4px;font-size:.72rem;font-family:var(--mono);font-weight:600}
+.db-bear{background:rgba(248,113,113,.15);color:var(--red)}
+.db-person{background:rgba(251,191,36,.15);color:var(--amber)}
+.db-other{background:rgba(34,211,238,.15);color:var(--accent)}
+.db-alert{background:rgba(248,113,113,.15);color:var(--red)}
+.em{font-family:var(--mono);font-size:.72rem;color:var(--text2)}
+.econf{font-family:var(--mono);font-size:.78rem}
+.cbar{width:80px;height:6px;background:var(--surface2);border-radius:3px;display:inline-block;vertical-align:middle;margin-left:.4rem}
+.cfill{height:100%;border-radius:3px}
+.mt{display:flex;gap:.3rem;margin-top:.2rem}
+.mtag{font-family:var(--mono);font-size:.65rem;padding:.1rem .4rem;border-radius:3px;background:rgba(34,211,238,.1);color:var(--accent);border:1px solid rgba(34,211,238,.2)}
+.empty{text-align:center;padding:3rem;color:var(--text2);font-family:var(--mono)}
+.rbtn{font-family:var(--mono);font-size:.75rem;color:var(--accent);background:none;border:1px solid var(--border);border-radius:6px;padding:.4rem .8rem;cursor:pointer;transition:all .2s}
+.rbtn:hover{border-color:var(--accent);background:rgba(34,211,238,.1)}
+.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
+@media(max-width:640px){.header{padding:1rem;flex-direction:column;gap:.5rem}.content{padding:1rem}.ec{flex-direction:column}.et{width:100%;height:160px}}
+</style>
+</head>
+<body>
+<div class="header">
+<h1>LEONARDO JR. <span>// EVENT VIEWER</span></h1>
+<div class="status-bar"><span><span class="dot"></span> ONLINE</span><span id="clock"></span></div>
+</div>
+<div class="content">
+<div class="topbar">
+<div class="stats" style="flex:1;margin-bottom:0">
+<div class="sc"><div class="lb">Total</div><div class="vl" style="color:var(--accent)" id="s-total">-</div></div>
+<div class="sc"><div class="lb">Bear</div><div class="vl" style="color:var(--red)" id="s-bear">-</div></div>
+<div class="sc"><div class="lb">Person</div><div class="vl" style="color:var(--amber)" id="s-person">-</div></div>
+<div class="sc"><div class="lb">Media</div><div class="vl" style="color:var(--green)" id="s-media">-</div></div>
+</div>
+<button class="rbtn" onclick="loadEvents()" style="margin-left:1rem">REFRESH</button>
+</div>
+<div class="el" id="elist"><div class="empty">Loading events...</div></div>
+</div>
+<script>
+var API=window.location.origin;
+var DID='LJ-671493E4-QDSF';
+var TKN='m0lCjXhKXBooGZ87ty_ASxbIQh0iD_MQwrYC-CVYuNU';
+
+function fmtTime(iso){
+  try{return new Date(iso).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo',hour12:false})}
+  catch(e){return iso||'---'}
+}
+function cc(c){if(c>=0.8)return'var(--green)';if(c>=0.6)return'var(--amber)';return'var(--red)'}
+function dc(t){if(!t)return'db-other';var s=t.toLowerCase();if(s.indexOf('bear')>=0)return'db-bear';if(s.indexOf('person')>=0||s.indexOf('human')>=0)return'db-person';return'db-other'}
+
+function loadEvents(){
+  var el=document.getElementById('elist');
+  el.innerHTML='<div class="empty">Loading...</div>';
+  var xhr=new XMLHttpRequest();
+  xhr.open('GET',API+'/api/v1/devices/'+DID+'/events?limit=50');
+  xhr.setRequestHeader('X-Api-Token',TKN);
+  xhr.onload=function(){
+    if(xhr.status!==200){el.innerHTML='<div class="empty">Error: '+xhr.status+'</div>';return}
+    var d=JSON.parse(xhr.responseText);
+    var evts=d.events||[];
+    document.getElementById('s-total').textContent=evts.length;
+    var bc=0,pc=0,mc=0;
+    for(var i=0;i<evts.length;i++){
+      if(evts[i].detection_type==='bear')bc++;
+      if(evts[i].detection_type==='person')pc++;
+      if(evts[i].media&&evts[i].media.length>0)mc++;
+    }
+    document.getElementById('s-bear').textContent=bc;
+    document.getElementById('s-person').textContent=pc;
+    document.getElementById('s-media').textContent=mc;
+    if(evts.length===0){el.innerHTML='<div class="empty">No events yet</div>';return}
+    var html='';
+    for(var i=0;i<evts.length;i++){
+      var ev=evts[i];
+      var badge=dc(ev.detection_type);
+      var conf=ev.confidence||0;
+      var cp=Math.round(conf*100);
+      var color=cc(conf);
+      var thumbUrl=API+'/api/v1/devices/events/'+ev.event_id+'/thumbnail';
+      var hasThumb=false,hasVideo=false;
+      if(ev.media){for(var j=0;j<ev.media.length;j++){
+        if(ev.media[j].media_type==='thumbnail'&&ev.media[j].upload_status==='completed')hasThumb=true;
+        if(ev.media[j].media_type==='video'&&ev.media[j].upload_status==='completed')hasVideo=true;
+      }}
+      var thumb=hasThumb?'<img src="'+thumbUrl+'" alt="thumb" onerror="this.parentElement.innerHTML=\'<div class=ni>Load Error</div>\'">':'<div class="ni">NO IMAGE</div>';
+      var tags='';
+      if(hasThumb)tags+='<span class="mtag">THUMB</span>';
+      if(hasVideo)tags+='<span class="mtag">VIDEO</span>';
+      html+='<div class="ec">';
+      html+='<div class="et">'+thumb+'</div>';
+      html+='<div class="eb">';
+      html+='<div class="etype"><span class="db '+badge+'">'+(ev.detection_type||'unknown').toUpperCase()+'</span>';
+      if(ev.location_mismatch)html+='<span class="db db-alert">LOCATION ALERT</span>';
+      html+='</div>';
+      html+='<div class="econf">Confidence: '+cp+'%<span class="cbar"><span class="cfill" style="width:'+cp+'%;background:'+color+'"></span></span></div>';
+      html+='<div class="em">'+fmtTime(ev.occurred_at)+'</div>';
+      html+='<div class="em" style="font-size:.68rem">ID: '+ev.event_id.substring(0,18)+'...</div>';
+      if(tags)html+='<div class="mt">'+tags+'</div>';
+      html+='</div></div>';
+    }
+    el.innerHTML=html;
+  };
+  xhr.onerror=function(){el.innerHTML='<div class="empty">Network error</div>'};
+  xhr.send();
+}
+
+function uc(){document.getElementById('clock').textContent=new Date().toLocaleString('ja-JP',{timeZone:'Asia/Tokyo',hour12:false})}
+uc();setInterval(uc,1000);
+loadEvents();
+</script>
+</body>
+</html>

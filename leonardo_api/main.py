@@ -58,6 +58,9 @@ async def health() -> dict:
 # QR コードのURL: /setup?device_id=...&fth=...
 # web/ ディレクトリの静的ファイルをそのまま返す
 # ---------------------------------------------------------------------------
+@app.get("/events", include_in_schema=False)
+async def serve_events() -> FileResponse:
+    return FileResponse(_WEB_DIR / "events.html")
 @app.get("/setup", include_in_schema=False)
 async def serve_setup() -> FileResponse:
     """QR コード読み取り後にスマホブラウザで開くセットアップ画面。"""
