@@ -157,6 +157,16 @@ class DetectionEventRequest(BaseModel):
     thumbnail_b64: str | None = Field(default=None, max_length=200000, description="Phase 2.1: JPEG thumbnail base64")
     timestamp: datetime | None = Field(default=None, description="後方互換: occurred_atを使用")
 
+    # --- GPS / Location fields (Phase 2 EDAS) ---
+    latitude: float | None = Field(default=None, ge=-90.0, le=90.0)
+    longitude: float | None = Field(default=None, ge=-180.0, le=180.0)
+    altitude_m: float | None = Field(default=None)
+    fix_method: str | None = Field(default=None, max_length=20)
+    accuracy_m: float | None = Field(default=None, ge=0.0)
+    location_source: str | None = Field(default=None, max_length=20)
+    time_source: str | None = Field(default=None, max_length=20)
+    time_confidence: str | None = Field(default=None, max_length=10)
+
     def get_detection_type(self) -> str | None:
         """detection.class_name or 後方互換 detection_type を返す"""
         if self.detection:

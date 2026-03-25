@@ -94,6 +94,16 @@ class DetectionEvent(Base):
     """
     __tablename__ = "detection_events"
 
+    # --- GPS / Location fields (Phase 2 EDAS) ---
+    latitude = Column(Numeric(10, 7), nullable=True)
+    longitude = Column(Numeric(11, 7), nullable=True)
+    altitude_m = Column(Numeric(7, 1), nullable=True)
+    fix_method = Column(String(20), nullable=True)
+    accuracy_m = Column(Numeric(8, 1), nullable=True)
+    location_source = Column(String(20), nullable=True)
+    time_source = Column(String(20), nullable=True)
+    time_confidence = Column(String(10), nullable=True)
+
     # --- Phase 1.1: UUID v7 をデバイスが生成、PKとして受け取る ---
     event_id = Column(
         UUID(as_uuid=True), primary_key=True,
