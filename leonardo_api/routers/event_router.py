@@ -144,6 +144,14 @@ async def receive_event(
             ip_address=ip,
             location_mismatch=False,  # geolocationで後から更新
             payload_json=body.model_dump(mode="json"),
+            latitude=body.latitude,
+            longitude=body.longitude,
+            altitude_m=body.altitude_m,
+            fix_method=body.fix_method,
+            accuracy_m=body.accuracy_m,
+            location_source=body.location_source,
+            time_source=body.time_source,
+            time_confidence=body.time_confidence,
         )
         .on_conflict_do_nothing(index_elements=["event_id"])
         .returning(DetectionEvent.event_id)
