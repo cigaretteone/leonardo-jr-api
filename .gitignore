@@ -43,3 +43,14 @@ Thumbs.db
 
 # Alembic
 alembic.ini.save
+
+# One-off scripts
+write_*.py
+patch_*.py
+check_*.py
+
+# Edge files (managed on Pi, not server)
+ring_recorder.py
+video_slicer.py
+thumbnail_capture.py
+leonardo-ring.service
