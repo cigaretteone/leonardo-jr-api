@@ -1,0 +1,19 @@
+[Unit]
+Description=Leonardo Jr Ring Buffer Recorder
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/manta/leonardo-jr-api
+ExecStartPre=-/usr/bin/pkill -f ring_recorder
+ExecStartPre=-/usr/bin/pkill -f "ffmpeg.*leonardo_ring"
+ExecStartPre=/bin/sleep 1
+ExecStart=/usr/bin/python3 /home/manta/leonardo-jr-api/ring_recorder.py
+Restart=always
+RestartSec=3
+StartLimitBurst=10
+StartLimitIntervalSec=60
+
+[Install]
+WantedBy=multi-user.target
