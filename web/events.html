@@ -62,6 +62,7 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 <div class="sc"><div class="lb">Media</div><div class="vl" style="color:var(--green)" id="s-media">-</div></div>
 </div>
 <button class="rbtn" onclick="loadEvents()" style="margin-left:1rem">REFRESH</button>
+<button class="rbtn" onclick="deleteAll()" style="margin-left:.5rem;color:var(--red);border-color:rgba(248,113,113,.3)">DELETE ALL</button>
 </div>
 <div class="el" id="elist"><div class="empty">Loading events...</div></div>
 </div>
@@ -77,6 +78,19 @@ function fmtTime(iso){
 function cc(c){if(c>=0.8)return'var(--green)';if(c>=0.6)return'var(--amber)';return'var(--red)'}
 function dc(t){if(!t)return'db-other';var s=t.toLowerCase();if(s.indexOf('bear')>=0)return'db-bear';if(s.indexOf('person')>=0||s.indexOf('human')>=0)return'db-person';return'db-other'}
 
+function deleteAll(){
+  if(!confirm('DELETE ALL EVENTS? This cannot be undone.'))return;
+  if(!confirm('Are you sure? ALL events, thumbnails and videos will be permanently deleted.'))return;
+  var xhr=new XMLHttpRequest();
+  xhr.open('DELETE',API+'/api/v1/devices/'+DID+'/events');
+  xhr.setRequestHeader('X-Api-Token',TKN);
+  xhr.onload=function(){
+    if(xhr.status===200){var d=JSON.parse(xhr.responseText);alert('Deleted '+d.deleted+' events');loadEvents()}
+    else{alert('Delete all failed: '+xhr.status)}
+  };
+  xhr.onerror=function(){alert('Network error')};
+  xhr.send();
+}
 function deleteEvent(eid){
   if(!confirm('Delete this event? This cannot be undone.'))return;
   var xhr=new XMLHttpRequest();

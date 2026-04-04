@@ -328,6 +328,74 @@ async def list_events(
     return {"events": out, "count": len(out)}
 
 
+
+# =============================================================================
+# DELETE /{device_id}/events — Delete ALL events for device
+# =============================================================================
+@router.delete(
+    "/{device_id}/events",
+    status_code=status.HTTP_200_OK,
+    summary="Delete all events for device",
+)
+async def delete_all_events(
+    device_id: str,
+    device: Annotated[Device, Depends(get_device_by_api_token)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    if device.device_id != device_id:
+        raise HTTPException(status_code=400, detail="device_id mismatch")
+
+    import os
+    from pathlib import Path
+    from sqlalchemy import select, delete as sql_delete, func
+    from ..config import MEDIA_STORAGE_PATH
+    from ..models import DetectionEvent, EventMedia
+
+    # Count events
+    count_stmt = select(func.count()).select_from(DetectionEvent).where(
+        DetectionEvent.device_id == device_id
+    )
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    # Delete all media files
+    media_stmt = select(EventMedia).join(
+        DetectionEvent, DetectionEvent.event_id == EventMedia.event_id
+    ).where(DetectionEvent.device_id == device_id)
+    media_result = await db.execute(media_stmt)
+    for m in media_result.scalars().all():
+        if m.storage_path:
+            fpath = Path(MEDIA_STORAGE_PATH) / m.storage_path
+            if fpath.exists():
+                fpath.unlink()
+
+    # Get all event_ids for this device
+    eid_stmt = select(DetectionEvent.event_id).where(
+        DetectionEvent.device_id == device_id
+    )
+    eid_result = await db.execute(eid_stmt)
+    event_ids = [r[0] for r in eid_result.fetchall()]
+
+    if event_ids:
+        # Delete media records
+        await db.execute(
+            sql_delete(EventMedia).where(EventMedia.event_id.in_(event_ids))
+        )
+        # Delete delivery records
+        try:
+            from ..models import EventDelivery
+            await db.execute(
+                sql_delete(EventDelivery).where(EventDelivery.event_id.in_(event_ids))
+            )
+        except Exception:
+            pass
+        # Delete events
+        await db.execute(
+            sql_delete(DetectionEvent).where(DetectionEvent.device_id == device_id)
+        )
+
+    await db.commit()
+    return {"deleted": total}
+
 # =============================================================================
 # DELETE /{device_id}/events/{event_id} — Delete single event + media
 # =============================================================================
