@@ -429,6 +429,8 @@ def send_event_http(metadata: dict, wwan_ip: str) -> SendResult:
         } if detection_type else None,
         "thumbnail_b64": metadata.get("thumbnail_b64"),
         "gps": metadata.get("_gps"),
+        "latitude": metadata.get("latitude"),
+        "longitude": metadata.get("longitude"),
         "device_status": None,
     }
 
@@ -794,6 +796,8 @@ def send_event_with_lte(
         "confidence": round(float(confidence), 4),
         "thumbnail_b64": _thumbnail_b64,
         "_gps": _gps,
+        "latitude": _gps["lat"] if _gps else None,
+        "longitude": _gps["lon"] if _gps else None,
     }
 
     # ── Alert Box: immediate audio warning (async) ──
