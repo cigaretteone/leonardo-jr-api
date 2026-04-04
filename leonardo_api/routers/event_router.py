@@ -241,6 +241,9 @@ async def receive_event(
     try:
         await send_detection_notification(
             device.notification_target,
+            latitude=float(new_event.latitude) if new_event.latitude else None,
+            longitude=float(new_event.longitude) if new_event.longitude else None,
+            occurred_at=new_event.occurred_at,
             device_id,
             body.get_detection_type(),
             body.get_confidence(),
@@ -321,6 +324,8 @@ async def list_events(
             "confidence": float(ev.confidence) if ev.confidence else None,
             "occurred_at": ev.occurred_at.isoformat() if ev.occurred_at else None,
             "received_at": ev.received_at.isoformat() if ev.received_at else None,
+            "latitude": float(ev.latitude) if ev.latitude else None,
+            "longitude": float(ev.longitude) if ev.longitude else None,
             "location_mismatch": ev.location_mismatch,
             "media": media_list,
         })

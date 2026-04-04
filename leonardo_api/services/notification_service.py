@@ -93,6 +93,9 @@ async def send_detection_notification(
     device_id: str,
     detection_type: str,
     confidence: float,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    occurred_at=None,
 ) -> None:
     """
     検知イベントを所有者に通知する。
@@ -105,12 +108,31 @@ async def send_detection_notification(
         logger.debug("通知先が未設定のためスキップ (device_id=%s)", device_id)
         return
 
-    label = {"bear": "熊", "human": "人", "vehicle": "車両"}.get(detection_type, detection_type)
+    label = {"bear": "熊", "person": "人", "human": "人", "vehicle": "車両"}.get(detection_type, detection_type)
+    # Format time in JST
+    time_str = "不明"
+    if occurred_at:
+        try:
+            from datetime import timezone, timedelta
+            jst = timezone(timedelta(hours=9))
+            jst_time = occurred_at.astimezone(jst)
+            time_str = jst_time.strftime("%Y/%m/%d %H:%M:%S JST")
+        except Exception:
+            time_str = str(occurred_at)
+    # GPS info
+    gps_str = "不明"
+    map_link = ""
+    if latitude and longitude:
+        gps_str = f"{latitude:.6f}, {longitude:.6f}"
+        map_link = f"https://maps.google.com/maps?q={latitude},{longitude}"
     message = (
         f"\n【Leonardo Jr. 検知アラート】\n"
         f"デバイス: {device_id}\n"
         f"検知対象: {label}\n"
-        f"信頼度: {confidence * 100:.1f}%"
+        f"信頼度: {confidence * 100:.1f}%\n"
+        f"検知時刻: {time_str}\n"
+        f"GPS座標: {gps_str}\n"
+        + (f"地図: {map_link}\n" if map_link else "")
     )
 
     if line_token := target.get("line_token"):
