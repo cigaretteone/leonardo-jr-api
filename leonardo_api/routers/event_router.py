@@ -241,12 +241,12 @@ async def receive_event(
     try:
         await send_detection_notification(
             device.notification_target,
-            latitude=float(new_event.latitude) if new_event.latitude else None,
-            longitude=float(new_event.longitude) if new_event.longitude else None,
-            occurred_at=new_event.occurred_at,
             device_id,
             body.get_detection_type(),
             body.get_confidence(),
+            latitude=float(new_event.latitude) if new_event.latitude else None,
+            longitude=float(new_event.longitude) if new_event.longitude else None,
+            occurred_at=new_event.occurred_at,
         )
         if mismatch:
             await send_mismatch_alert(
