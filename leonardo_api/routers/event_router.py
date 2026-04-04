@@ -348,6 +348,7 @@ async def delete_event(
     from pathlib import Path
     from sqlalchemy import select, delete as sql_delete
     from ..config import MEDIA_STORAGE_PATH
+    from ..models import DetectionEvent, EventMedia
 
     # Check event exists
     evt_stmt = select(DetectionEvent).where(
