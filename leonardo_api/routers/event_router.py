@@ -346,6 +346,7 @@ async def delete_event(
         raise HTTPException(status_code=400, detail="device_id mismatch")
 
     from pathlib import Path
+    from sqlalchemy import select, delete as sql_delete
     from ..config import MEDIA_STORAGE_PATH
 
     # Check event exists
@@ -369,7 +370,6 @@ async def delete_event(
                 fpath.unlink()
 
     # Delete media records
-    from sqlalchemy import delete as sql_delete
     await db.execute(sql_delete(EventMedia).where(EventMedia.event_id == event_id))
 
     # Delete event delivery records if they exist
