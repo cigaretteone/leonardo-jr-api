@@ -44,6 +44,7 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 .rbtn:hover{border-color:var(--accent);background:rgba(34,211,238,.1)}
 .dbtn{font-family:var(--mono);font-size:.7rem;color:var(--red);background:none;border:1px solid rgba(248,113,113,.3);border-radius:4px;padding:.2rem .5rem;cursor:pointer;transition:all .2s;margin-top:.4rem}
 .dbtn:hover{border-color:var(--red);background:rgba(248,113,113,.15)}
+.minimap{width:100%;height:150px;border-radius:6px;border:1px solid var(--border);margin-top:6px}
 .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
 @media(max-width:640px){.header{padding:1rem;flex-direction:column;gap:.5rem}.content{padding:1rem}.ec{flex-direction:column}.et{width:100%;height:160px}}
 #mapbox{height:300px;border-radius:10px;border:1px solid var(--border);margin-bottom:1rem;z-index:1}
@@ -187,6 +188,7 @@ function loadEvents(){
       if(ev.latitude&&ev.longitude){
         var mUrl='https://maps.google.com/maps?q='+ev.latitude+','+ev.longitude;
         html+='<div class="em" style="font-size:.7rem"><a href="'+mUrl+'" target="_blank" style="color:var(--accent);text-decoration:none">&#x1F4CD; '+ev.latitude.toFixed(5)+', '+ev.longitude.toFixed(5)+'</a></div>';
+        html+='<div class="minimap" id="mmap-'+ev.event_id+'"></div>';
       }
       if(tags)html+='<div class="mt">'+tags+'</div>';
       if(hasVideo){var vUrl=API+'/api/v1/devices/events/'+ev.event_id+'/video';html+='<div style="margin-top:6px"><video controls preload="none" style="width:100%;max-width:320px;border-radius:6px;border:1px solid #1e2d45"><source src="'+vUrl+'" type="video/mp4"></video></div>';}
@@ -194,6 +196,20 @@ function loadEvents(){
       html+='</div></div>';
     }
     el.innerHTML=html;
+    // Initialize mini maps
+    for(var i=0;i<evts.length;i++){
+      var ev=evts[i];
+      if(ev.latitude&&ev.longitude){
+        var mid="mmap-"+ev.event_id;
+        var mel=document.getElementById(mid);
+        if(mel){
+          var mm=L.map(mid,{zoomControl:false,attributionControl:false,dragging:false,scrollWheelZoom:false}).setView([ev.latitude,ev.longitude],14);
+          L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18}).addTo(mm);
+          var clr=ev.detection_type==="bear"?"red":"orange";
+          L.circleMarker([ev.latitude,ev.longitude],{radius:8,fillColor:clr,color:"#fff",weight:2,fillOpacity:0.9}).addTo(mm);
+        }
+      }
+    }
   };
   xhr.onerror=function(){el.innerHTML='<div class="empty">Network error</div>'};
   xhr.send();
