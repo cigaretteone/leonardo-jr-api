@@ -119,6 +119,9 @@ from urllib3.poolmanager import PoolManager
 # Phase 1.1: JR API のみに統一（旧 ENDPOINT_URL / BEARER_TOKEN 廃止）
 DEVICE_ID = "LJ-671493E4-QDSF"
 API_TOKEN = "m0lCjXhKXBooGZ87ty_ASxbIQh0iD_MQwrYC-CVYuNU"
+# --- Always-on mode: skip mmcli modem management (NetworkManager handles connection) ---
+ALWAYS_ON = True
+
 JR_API_URL_TEMPLATE = "https://leonardo-jr-api.onrender.com/api/v1/devices/{}/event"
 
 APN = "ppsim.jp"
@@ -141,7 +144,8 @@ class SourceIPAdapter(HTTPAdapter):
         super().__init__(**kwargs)
 
     def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
-        pool_kwargs["source_address"] = (self._source_ip, 0)
+        if self._source_ip:
+            pool_kwargs["source_address"] = (self._source_ip, 0)
         return super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
 
 # ===========================================================
@@ -313,7 +317,7 @@ def get_bearer_info(modem_index: str) -> Optional[dict]:
 
 
 def setup_network_interface(bearer: dict) -> bool:
-    ip = bearer["ip"]
+    ip = (bearer["ip"] if bearer else None)
     prefix = bearer["prefix"]
 
     gateway = bearer["gateway"]
@@ -689,6 +693,7 @@ def send_event_with_lte(
     occurred_at: Optional[str] = None,
     inference_pause: Optional[Callable[[], None]] = None,
     inference_resume: Optional[Callable[[], None]] = None,
+    video_path: Optional[str] = None,
 ) -> bool:
     """
     検知イベント発生時の LTE 送信エントリポイント。
@@ -756,13 +761,14 @@ def send_event_with_lte(
     except Exception as ge:
         logger.warning('GPS load failed: %s', ge)
     
-    # Phase 2.1: generate thumbnail (with fallback)
+    # Phase 2.1: generate thumbnail from image_path
     _thumbnail_b64 = None
     try:
-        from thumbnail_capture import thumbnail_from_file
-        _thumbnail_b64 = thumbnail_from_file(image_path)
-        if _thumbnail_b64:
-            logger.info("Thumbnail generated: %d chars", len(_thumbnail_b64))
+        import base64, os
+        if image_path and os.path.exists(image_path) and os.path.getsize(image_path) > 0:
+            with open(image_path, "rb") as img_f:
+                _thumbnail_b64 = base64.b64encode(img_f.read()).decode("ascii")
+            logger.info("Thumbnail from file: %s (%d chars)", image_path, len(_thumbnail_b64))
     except Exception as te:
         logger.warning("Thumbnail from file failed: %s", te)
     if not _thumbnail_b64:
@@ -842,43 +848,48 @@ def send_event_with_lte(
             save_to_local_queue(image_path, metadata)
             return False
 
+        bearer = None  # ALWAYS_ON: initialize to avoid UnboundLocalError
         # [3] AI 推論停止フック（LTE 通信中は推論を停止する）
         if inference_pause:
             inference_pause()
 
         # [4] モデム enable
-        if not enable_modem(modem_index):
-            logger.error("モデム enable 失敗: キュー保存して終了")
-            save_to_local_queue(image_path, metadata)
-            return False
+        if not ALWAYS_ON:
+            if not enable_modem(modem_index):
+                logger.error("モデム enable 失敗: キュー保存して終了")
+                save_to_local_queue(image_path, metadata)
+                return False
 
         # [5] APN 接続
-        if not connect_lte(modem_index):
-            logger.error("LTE 接続失敗: キュー保存して終了")
-            save_to_local_queue(image_path, metadata)
-            return False
+        if not ALWAYS_ON:
+            if not connect_lte(modem_index):
+                logger.error("LTE 接続失敗: キュー保存して終了")
+                save_to_local_queue(image_path, metadata)
+                return False
 
         # [6a] Bearer 情報取得
-        bearer = get_bearer_info(modem_index)
-        if bearer is None:
-            logger.error("Bearer 情報取得失敗: キュー保存して終了")
-            save_to_local_queue(image_path, metadata)
-            return False
+        if not ALWAYS_ON:
+            bearer = get_bearer_info(modem_index)
+            if bearer is None:
+                logger.error("Bearer 情報取得失敗: キュー保存して終了")
+                save_to_local_queue(image_path, metadata)
+                return False
 
         # [6b] ネットワーク設定（IP 付与・デフォルトルート）
-        if not setup_network_interface(bearer):
-            logger.error("ネットワーク設定失敗: キュー保存して終了")
+        if not ALWAYS_ON:
+            if not setup_network_interface(bearer):
+                logger.error("ネットワーク設定失敗: キュー保存して終了")
             save_to_local_queue(image_path, metadata)
             return False
 
         # [7] 未送信キューを先に再送（最大 limit=3 件）
         pending = load_local_queue()
         if pending:
-            sent = process_local_queue(wwan_ip=bearer["ip"])
+            sent = process_local_queue(wwan_ip=(bearer["ip"] if bearer else None))
             logger.info("キュー再送: %d 件成功（キュー残: %d 件）", sent, len(pending) - sent)
 
         # [8] 本イベント送信（event_id は metadata に含まれる）
-        result = send_event_http(metadata, bearer["ip"])
+        result = send_event_http(metadata, (bearer["ip"] if bearer else None))
 
         if result.acked:
             logger.info(
@@ -888,12 +899,27 @@ def send_event_with_lte(
             # Phase 2.1: video upload if requested
             if metadata.get('_video_requested') and metadata.get('_upload_url'):
                 try:
-                    from video_slicer import slice_video, cleanup_slice
-                    v_path, v_sha, v_size = slice_video(metadata['event_id'])
+                    import hashlib
+                    v_path = None
+                    v_sha = None
+                    v_size = 0
+                    # Use provided video_path if available, else try ring buffer
+                    if video_path and os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+                        v_path = video_path
+                        with open(v_path, 'rb') as vf:
+                            v_sha = hashlib.sha256(vf.read()).hexdigest()
+                        v_size = os.path.getsize(v_path)
+                        logger.info('Video from app: %s (%d bytes)', v_path, v_size)
+                    else:
+                        try:
+                            from video_slicer import slice_video, cleanup_slice
+                            v_path, v_sha, v_size = slice_video(metadata['event_id'])
+                        except Exception:
+                            pass
                     if v_path and v_sha:
                         logger.info('Video ready: %s (%d bytes)', v_path, v_size)
                         v_result = upload_video_http(
-                            metadata['_upload_url'], v_path, v_sha, bearer['ip']
+                            metadata['_upload_url'], v_path, v_sha, (bearer['ip'] if bearer else None)
                         )
                         if v_result.acked:
                             logger.info('Video uploaded: event_id=%s', metadata['event_id'])
@@ -935,8 +961,10 @@ def send_event_with_lte(
     finally:
         # [9] 切断・disable・ネットワーク削除（常に実行）
         if modem_index is not None:
-            disconnect_lte(modem_index)
-            disable_modem(modem_index)
+            if not ALWAYS_ON:
+                disconnect_lte(modem_index)
+            if not ALWAYS_ON:
+                disable_modem(modem_index)
         teardown_network_interface()
         # AI 推論再開フック（LTE 通信完了後に推論を再開する）
         if inference_resume:

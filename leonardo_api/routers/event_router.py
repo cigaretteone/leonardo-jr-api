@@ -327,6 +327,64 @@ async def list_events(
 
     return {"events": out, "count": len(out)}
 
+
+# =============================================================================
+# DELETE /{device_id}/events/{event_id} — Delete single event + media
+# =============================================================================
+@router.delete(
+    "/{device_id}/events/{event_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete event and associated media",
+)
+async def delete_event(
+    device_id: str,
+    event_id: str,
+    device: Annotated[Device, Depends(get_device_by_api_token)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    if device.device_id != device_id:
+        raise HTTPException(status_code=400, detail="device_id mismatch")
+
+    from pathlib import Path
+    from ..config import MEDIA_STORAGE_PATH
+
+    # Check event exists
+    evt_stmt = select(DetectionEvent).where(
+        DetectionEvent.event_id == event_id,
+        DetectionEvent.device_id == device_id,
+    )
+    evt_result = await db.execute(evt_stmt)
+    evt = evt_result.scalar_one_or_none()
+    if evt is None:
+        raise HTTPException(status_code=404, detail="event_not_found")
+
+    # Delete media files from disk
+    media_stmt = select(EventMedia).where(EventMedia.event_id == event_id)
+    media_result = await db.execute(media_stmt)
+    media_rows = media_result.scalars().all()
+    for m in media_rows:
+        if m.storage_path:
+            fpath = Path(MEDIA_STORAGE_PATH) / m.storage_path
+            if fpath.exists():
+                fpath.unlink()
+
+    # Delete media records
+    from sqlalchemy import delete as sql_delete
+    await db.execute(sql_delete(EventMedia).where(EventMedia.event_id == event_id))
+
+    # Delete event delivery records if they exist
+    try:
+        from ..models import EventDelivery
+        await db.execute(sql_delete(EventDelivery).where(EventDelivery.event_id == event_id))
+    except Exception:
+        pass
+
+    # Delete event record
+    await db.execute(sql_delete(DetectionEvent).where(DetectionEvent.event_id == event_id))
+    await db.commit()
+
+    return None
+
 # =============================================================================
 # GET /{device_id}/status (変更なし)
 # =============================================================================
