@@ -67,7 +67,7 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-MEDIA_STORAGE_PATH = "/tmp/media"
+MEDIA_STORAGE_PATH = os.environ.get("MEDIA_STORAGE_PATH", "/var/data/media")
 THUMBNAIL_SUBDIR = "thumbnails"
 VIDEO_SUBDIR = "videos"
 MAX_THUMBNAIL_SIZE = 200_000
