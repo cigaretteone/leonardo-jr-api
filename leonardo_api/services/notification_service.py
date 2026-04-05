@@ -208,6 +208,10 @@ async def send_detection_notification(
         await _send_line_notify(line_token, message)
 
     if email := target.get("email"):
+      if target.get("email_enabled", True) is False:
+        logger.info("Email disabled by user settings")
+        email = None
+    if email:
         _em_now = _time.time()
         _em_last = _last_email_times.get(device_id, 0)
         if _em_now - _em_last >= EMAIL_COOLDOWN_SEC:
@@ -225,6 +229,10 @@ async def send_detection_notification(
 
     # ── LINE Messaging API (immediate) ──
     if line_uid := target.get("line_user_id"):
+      if target.get("line_enabled", True) is False:
+        logger.info("LINE disabled by user settings")
+        line_uid = None
+    if line_uid:
         map_link = f"https://maps.google.com/maps?q={latitude},{longitude}" if latitude and longitude else ""
         line_msg = (
             f"\u3010Leonardo Jr.\u3011\n"
@@ -238,6 +246,10 @@ async def send_detection_notification(
 
     # ── Phone call (bear only, 5min cooldown) ──
     if phone := target.get("phone"):
+      if target.get("call_enabled", True) is False:
+        logger.info("Phone call disabled by user settings")
+        phone = None
+    if phone:
         if detection_type in ("bear",):
             import asyncio
             await asyncio.to_thread(
@@ -274,6 +286,10 @@ async def send_mismatch_alert(
         await _send_line_notify(line_token, message)
 
     if email := target.get("email"):
+      if target.get("email_enabled", True) is False:
+        logger.info("Email disabled by user settings")
+        email = None
+    if email:
         import asyncio
         await asyncio.to_thread(
             _send_email_sync,

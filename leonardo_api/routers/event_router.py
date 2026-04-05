@@ -231,7 +231,10 @@ async def receive_event(
         await save_thumbnail(db, str(body.event_id), device_id, thumbnail_b64)
 
     # ── Step 5d: 動画リクエスト判定 (Phase 2.1: 常にtrue) ──
-    video_requested = True
+    # Video only for bear or high confidence
+    _det_type = body.get_detection_type()
+    _conf = body.get_confidence()
+    video_requested = (_det_type == "bear") or (_conf is not None and _conf >= 0.7)
     if video_requested:
         await create_pending_video(db, str(body.event_id))
 
