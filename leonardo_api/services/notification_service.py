@@ -93,6 +93,8 @@ def _send_email_sync(to_email: str, subject: str, body: str) -> bool:
 import time as _time
 _last_call_time = 0
 CALL_COOLDOWN_SEC = 300
+EMAIL_COOLDOWN_SEC = 120
+_last_email_times = {}
 
 def _make_phone_call(to_phone, detection_type, confidence, device_id, latitude=None, longitude=None):
     global _last_call_time
@@ -177,13 +179,19 @@ async def send_detection_notification(
         await _send_line_notify(line_token, message)
 
     if email := target.get("email"):
-        import asyncio
-        await asyncio.to_thread(
-            _send_email_sync,
-            email,
-            f"【Leonardo Jr.】{label}を検知しました",
-            message,
-        )
+        _em_now = _time.time()
+        _em_last = _last_email_times.get(device_id, 0)
+        if _em_now - _em_last >= EMAIL_COOLDOWN_SEC:
+            _last_email_times[device_id] = _em_now
+            import asyncio
+            await asyncio.to_thread(
+                _send_email_sync,
+                email,
+                f"【Leonardo Jr.】{label}を検知しました",
+                message,
+            )
+        else:
+            logger.info("Email cooldown active (%ds left)", int(EMAIL_COOLDOWN_SEC - (_em_now - _em_last)))
 
 
     # ── Phone call (bear only, 5min cooldown) ──
