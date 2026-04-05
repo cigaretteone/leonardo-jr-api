@@ -89,6 +89,35 @@ def _send_email_sync(to_email: str, subject: str, body: str) -> bool:
 
 
 
+
+async def _send_line_message(user_id: str, message: str) -> bool:
+    """LINE Messaging API Push Message."""
+    token = settings.LINE_CHANNEL_ACCESS_TOKEN
+    if not token:
+        logger.warning("LINE_CHANNEL_ACCESS_TOKEN not set")
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.line.me/v2/bot/message/push",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "to": user_id,
+                    "messages": [{"type": "text", "text": message}],
+                },
+            )
+        if resp.status_code == 200:
+            logger.info("LINE message sent to %s", user_id[:10])
+            return True
+        logger.warning("LINE send failed (status=%d): %s", resp.status_code, resp.text)
+        return False
+    except Exception as e:
+        logger.error("LINE send error: %s", e)
+        return False
+
 # ── Twilio phone call ───────────────────────────────────
 import time as _time
 _last_call_time = 0
@@ -193,6 +222,19 @@ async def send_detection_notification(
         else:
             logger.info("Email cooldown active (%ds left)", int(EMAIL_COOLDOWN_SEC - (_em_now - _em_last)))
 
+
+    # ── LINE Messaging API (immediate) ──
+    if line_uid := target.get("line_user_id"):
+        map_link = f"https://maps.google.com/maps?q={latitude},{longitude}" if latitude and longitude else ""
+        line_msg = (
+            f"\u3010Leonardo Jr.\u3011\n"
+            f"{label}\u3092\u691c\u77e5\u3057\u307e\u3057\u305f\n"
+            f"\u4fe1\u983c\u5ea6: {confidence * 100:.0f}%\n"
+            f"\u6642\u523b: {time_str}\n"
+            + (f"\u5730\u56f3: {map_link}\n" if map_link else "")
+            + f"\n\u25b6 \u78ba\u8a8d: https://leonardo-jr-api.onrender.com/events"
+        )
+        await _send_line_message(line_uid, line_msg)
 
     # ── Phone call (bear only, 5min cooldown) ──
     if phone := target.get("phone"):

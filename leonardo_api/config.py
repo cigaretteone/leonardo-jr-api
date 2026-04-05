@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_FROM_NUMBER: str = ""
+    LINE_CHANNEL_ACCESS_TOKEN: str = ""
+    LINE_USER_ID: str = ""
 
     # -------------------------------------------------------------------------
     # IPジオロケーション
