@@ -29,3 +29,6 @@ pytest>=7.4.0
 pytest-asyncio>=0.23.0
 email-validator
 bcrypt==4.0.1
+
+# Twilio (phone call)
+twilio>=9.0.0

@@ -88,6 +88,44 @@ def _send_email_sync(to_email: str, subject: str, body: str) -> bool:
         return False
 
 
+
+# ── Twilio phone call ───────────────────────────────────
+import time as _time
+_last_call_time = 0
+CALL_COOLDOWN_SEC = 300
+
+def _make_phone_call(to_phone, detection_type, confidence, device_id, latitude=None, longitude=None):
+    global _last_call_time
+    if _time.time() - _last_call_time < CALL_COOLDOWN_SEC:
+        logger.info("Phone call skipped: cooldown (%ds left)", int(CALL_COOLDOWN_SEC - (_time.time() - _last_call_time)))
+        return False
+    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
+        logger.warning("Twilio not configured")
+        return False
+    try:
+        from twilio.rest import Client
+        client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+        label = {"bear": "\u718a", "person": "\u4eba"}.get(detection_type, detection_type)
+        conf_pct = int(confidence * 100)
+        loc = ""
+        if latitude and longitude:
+            loc = f". GPS {latitude:.4f}, {longitude:.4f}"
+        twiml = (
+            '<Response><Say language="ja-JP" voice="Polly.Mizuki">'
+            f'Leonardo Jr \u691c\u77e5\u30a2\u30e9\u30fc\u30c8\u3002'
+            f'\u30c7\u30d0\u30a4\u30b9 {device_id} \u3067 {label} \u3092\u691c\u77e5\u3057\u307e\u3057\u305f\u3002'
+            f'\u4fe1\u983c\u5ea6 {conf_pct} \u30d1\u30fc\u30bb\u30f3\u30c8{loc}\u3002'
+            f'\u7e70\u308a\u8fd4\u3057\u307e\u3059\u3002{label} \u3092\u691c\u77e5\u3002\u4fe1\u983c\u5ea6 {conf_pct} \u30d1\u30fc\u30bb\u30f3\u30c8\u3002'
+            '</Say></Response>'
+        )
+        call = client.calls.create(twiml=twiml, to=to_phone, from_=settings.TWILIO_FROM_NUMBER)
+        _last_call_time = _time.time()
+        logger.info("Phone call initiated: to=%s sid=%s", to_phone, call.sid)
+        return True
+    except Exception as e:
+        logger.error("Phone call failed: %s", e)
+        return False
+
 async def send_detection_notification(
     notification_target_json: str | None,
     device_id: str,
@@ -146,6 +184,16 @@ async def send_detection_notification(
             f"【Leonardo Jr.】{label}を検知しました",
             message,
         )
+
+
+    # ── Phone call (bear only, 5min cooldown) ──
+    if phone := target.get("phone"):
+        if detection_type in ("bear",):
+            import asyncio
+            await asyncio.to_thread(
+                _make_phone_call, phone, detection_type, confidence,
+                device_id, latitude, longitude,
+            )
 
 
 async def send_mismatch_alert(
