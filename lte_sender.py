@@ -411,8 +411,10 @@ def send_event_http(metadata: dict, wwan_ip: str) -> SendResult:
     socket.getaddrinfo = _patched_gai
 
     session = requests.Session()
-    session.mount("https://", SourceIPAdapter(wwan_ip))
-    session.mount("http://", SourceIPAdapter(wwan_ip))
+    if wwan_ip:
+        if wwan_ip:
+            session.mount("https://", SourceIPAdapter(wwan_ip))
+        session.mount("http://", SourceIPAdapter(wwan_ip))
 
     # Phase 1.1 ペイロード構築
     detection_type = metadata.get("detection_type")
@@ -532,7 +534,8 @@ def upload_video_http(upload_url, video_path, sha256_hex, wwan_ip, codec="h265",
     socket.getaddrinfo = _patched_gai
     try:
         session = requests.Session()
-        session.mount("https://", SourceIPAdapter(wwan_ip))
+        if wwan_ip:
+            session.mount("https://", SourceIPAdapter(wwan_ip))
         headers = {
             "X-Api-Token": API_TOKEN,
             "Content-Type": "application/octet-stream",
@@ -928,7 +931,10 @@ def send_event_with_lte(
                         if v_result.acked:
                             logger.info('Video uploaded: event_id=%s', metadata['event_id'])
                             metadata['_vid_ok'] = True
-                            cleanup_slice(metadata['event_id'])
+                            try:
+                                cleanup_slice(metadata['event_id'])
+                            except NameError:
+                                pass
                         else:
                             logger.warning('Video upload failed: event_id=%s', metadata['event_id'])
                     else:
