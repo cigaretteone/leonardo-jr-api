@@ -111,7 +111,7 @@ def _make_phone_call(to_phone, detection_type, confidence, device_id, latitude=N
         if latitude and longitude:
             loc = f". GPS {latitude:.4f}, {longitude:.4f}"
         twiml = (
-            '<Response><Say language="ja-JP" voice="Polly.Mizuki">'
+            '<Response><Say language="ja-JP" voice="alice">'
             f'Leonardo Jr \u691c\u77e5\u30a2\u30e9\u30fc\u30c8\u3002'
             f'\u30c7\u30d0\u30a4\u30b9 {device_id} \u3067 {label} \u3092\u691c\u77e5\u3057\u307e\u3057\u305f\u3002'
             f'\u4fe1\u983c\u5ea6 {conf_pct} \u30d1\u30fc\u30bb\u30f3\u30c8{loc}\u3002'
