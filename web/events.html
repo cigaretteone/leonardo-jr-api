@@ -192,7 +192,7 @@ function loadEvents(){
         html+='<div class="minimap" id="mmap-'+ev.event_id+'"></div>';
       }
       if(tags)html+='<div class="mt">'+tags+'</div>';
-      if(hasVideo){var vUrl=API+'/api/v1/devices/events/'+ev.event_id+'/video';html+='<div style="margin-top:6px"><video controls preload="none" style="width:100%;max-width:320px;border-radius:6px;border:1px solid #1e2d45"><source src="'+vUrl+'" type="video/mp4"></video></div>';}
+      if(hasVideo){var vUrl=API+'/api/v1/devices/'+DID+'/events/'+ev.event_id+'/video';html+='<div style="margin-top:6px"><video controls preload="none" style="width:100%;max-width:320px;border-radius:6px;border:1px solid #1e2d45"><source src="'+vUrl+'" type="video/mp4"></video></div>';}
       html+='<button class="dbtn" onclick="deleteEvent(\''+ev.event_id+'\')">&times; DELETE</button>';
       html+='</div></div>';
     }

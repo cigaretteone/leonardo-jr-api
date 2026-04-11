@@ -20,8 +20,15 @@ Phase 1.1対応: UUID v7 event_id, JSON POST, X-Api-Token認証, 冪等性保証
       mmcli --enable でモデムをenable状態にする。
       "Invalid transition" エラーは既にenabled状態とみなして True を返す。
 
-  connect_lte(modem_index) -> bool
-      mmcli --simple-connect で APN 接続する (APN: ppsim.jp)。
+  _load_lte_config() -> dict
+      config.json から apn_auto_detect / apn_fallback / apn_user / apn_password を読み込む。
+
+  detect_apn_via_at(at_ports, cereg_timeout) -> Optional[str]
+      ModemManager を停止して AT ポートで EPS アタッチ時のネットワーク返却 APN を検出する。
+      空 APN→CFUN=0/1→CEREG 待機→CGCONTRDP で取得。終了後 MM を再起動する。
+
+  connect_lte(modem_index, apn) -> bool
+      mmcli --simple-connect で APN 接続する。apn=None で APN 定数を使用。
 
   get_bearer_info(modem_index) -> Optional[dict]
       mmcli --bearer --output-json から IP/GW を取得する。
@@ -70,7 +77,9 @@ Phase 1.1対応: UUID v7 event_id, JSON POST, X-Api-Token認証, 冪等性保証
   [3] AI推論停止フック呼び出し（inference_pause が設定されている場合）
   [4] モデム enable（Invalid transition → 既にenabled扱いで続行）
         └─ 失敗 → ローカルキュー保存して return False
-  [5] APN 接続 simple-connect (ppsim.jp / pp@sim / jpn)
+  [4.5] APN 自動検出（apn_auto_detect=True 時）: MM停止→AT操作→MM再起動→モデム再enable
+        └─ 検出失敗 → apn_fallback を使用
+  [5] APN 接続 simple-connect（検出 APN / apn_fallback / 定数 APN の優先順）
         └─ 失敗 → ローカルキュー保存して return False
   [6] Bearer 情報取得（IP / GW）
         └─ 失敗 → ローカルキュー保存して return False
@@ -198,6 +207,160 @@ def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
 
 
 # ===========================================================
+# APN 自動検出
+# ===========================================================
+
+def _load_lte_config() -> dict:
+    """config.json から LTE 接続設定を読み込む。キー不在時はデフォルト値を返す。"""
+    defaults = {
+        "apn_auto_detect": True,
+        "apn_fallback": APN,
+        "apn_user": APN_USER,
+        "apn_password": APN_PASSWORD,
+    }
+    try:
+        cfg_path = Path("/home/manta/leonardo/config.json")
+        if cfg_path.exists():
+            data = json.loads(cfg_path.read_text())
+            for k in defaults:
+                if k in data:
+                    defaults[k] = data[k]
+    except Exception as e:
+        logger.warning("config.json 読み込み失敗 (デフォルト使用): %s", e)
+    return defaults
+
+
+def detect_apn_via_at(
+    at_ports: Optional[list] = None,
+    cereg_timeout: int = 60,
+) -> Optional[str]:
+    """
+    AT コマンドでネットワーク返却 APN を自動検出する。
+
+    手順: ModemManager 停止 → AT ポート検出 → 空APN設定 → CFUN=0/1 →
+          CEREG=1 待機 → CGCONTRDP=1 → APN 取得 → MM 再起動
+    ttyUSB0 (AlertBox) は除外。at_ports=None で [ttyUSB2, ttyUSB3, ttyUSB4] を試行。
+    終了後（成功・失敗問わず）ModemManager を再起動する。
+
+    Returns: 検出した APN 文字列、失敗時は None
+    """
+    try:
+        import serial as _serial
+    except ImportError:
+        logger.error("pyserial 未インストール (pip3 install pyserial): APN自動検出スキップ")
+        return None
+
+    if at_ports is None:
+        at_ports = ["/dev/ttyUSB2", "/dev/ttyUSB3", "/dev/ttyUSB4"]
+
+    _CRLF = "\r\n"
+    _EMPTY_APN_CMD = 'AT+CGDCONT=1,"IP",""'
+
+    def _at(ser, cmd: str, wait: float = 1.5) -> str:
+        ser.write((cmd + _CRLF).encode())
+        time.sleep(wait)
+        return ser.read_all().decode(errors="ignore")
+
+    def _parse_apn(resp: str) -> Optional[str]:
+        for line in resp.splitlines():
+            if "+CGCONTRDP:" in line:
+                # +CGCONTRDP: 1,5,ppsim.jp,100.x.x.x,...
+                fields = line.split(":", 1)[-1].strip().split(",")
+                if len(fields) >= 3 and fields[2].strip():
+                    return fields[2].strip()
+        return None
+
+    # MM 停止
+    _run(["sudo", "systemctl", "stop", "ModemManager"], timeout=10)
+    time.sleep(2)
+
+    ser = None
+    detected_apn = None
+
+    try:
+        # AT ポート検出（ttyUSB2 優先、ttyUSB0 は AlertBox のため絶対除外）
+        for port in at_ports:
+            if "ttyUSB0" in port:
+                continue
+            try:
+                s = _serial.Serial(port, 115200, timeout=3)
+                time.sleep(0.3)
+                s.read_all()
+                s.write(("AT" + _CRLF).encode())
+                time.sleep(0.5)
+                resp = s.read_all().decode(errors="ignore")
+                if "OK" in resp:
+                    ser = s
+                    logger.info("AT ポート確定: %s", port)
+                    break
+                s.close()
+            except Exception:
+                continue
+
+        if ser is None:
+            logger.error("有効な AT ポートが見つかりません: %s", at_ports)
+            return None
+
+        # 空 APN 設定
+        _at(ser, _EMPTY_APN_CMD, 1.0)
+
+        # CFUN=0 (RF OFF)
+        _at(ser, "AT+CFUN=0", 5.0)
+
+        # CFUN=1 (RF ON)
+        _at(ser, "AT+CFUN=1", 10.0)
+
+        # CEREG 待機（最大 cereg_timeout 秒）
+        registered = False
+        elapsed = 0
+        while elapsed < cereg_timeout:
+            time.sleep(5)
+            elapsed += 5
+            resp = _at(ser, "AT+CEREG?", 1.0)
+            logger.debug("CEREG [%ds]: %s", elapsed, resp.strip())
+            if ",1" in resp or ",5" in resp:
+                registered = True
+                logger.info("LTE 登録成功 (%ds): %s", elapsed, resp.strip())
+                break
+
+        if not registered:
+            logger.warning("CEREG タイムアウト (%ds): APN 検出失敗", cereg_timeout)
+            return None
+
+        # ネットワーク返却 APN 取得（EPS default bearer は CEREG 登録時に自動確立）
+        resp = _at(ser, "AT+CGCONTRDP=1", 2.0)
+        detected_apn = _parse_apn(resp)
+        if detected_apn:
+            logger.info("APN 自動検出成功: %s", detected_apn)
+        else:
+            logger.warning("CGCONTRDP 応答から APN 取得失敗: %s", resp.strip())
+
+
+    except Exception as e:
+        logger.error("APN 自動検出中に例外: %s", e)
+        detected_apn = None
+    finally:
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception:
+                pass
+
+        # MM 再起動（必ず実行）
+        _run(["sudo", "systemctl", "start", "ModemManager"], timeout=10)
+        # MM がモデムを検出するまで待機（最大 15 秒）
+        for _ in range(15):
+            time.sleep(1)
+            rc, out, _ = _run(["mmcli", "-L"], timeout=5)
+            if rc == 0 and "/Modem/" in out:
+                break
+        else:
+            logger.warning("MM 再起動後のモデム検出タイムアウト")
+
+    return detected_apn
+
+
+# ===========================================================
 # モデム操作関数
 # ===========================================================
 
@@ -256,17 +419,19 @@ def enable_modem(modem_index: str) -> bool:
     return False
 
 
-def connect_lte(modem_index: str) -> bool:
+def connect_lte(modem_index: str, apn: Optional[str] = None) -> bool:
     """
     mmcli --simple-connect で APN 接続する。
+    apn=None のとき定数 APN を使用する。
     # simple-connect: 平均300mA × 15秒 ≈ 1.25mAh
     Returns: 接続成功時 True
     """
+    _apn = apn if apn else APN
     rc, _, _ = _run(
         [
             "mmcli", "-m", modem_index,
             "--simple-connect",
-            f"apn={APN},user={APN_USER},password={APN_PASSWORD},allowed-auth=pap,ip-type=ipv4",
+            f"apn={_apn},user={APN_USER},password={APN_PASSWORD},allowed-auth=pap,ip-type=ipv4",
         ],
         timeout=CONNECT_TIMEOUT_SEC,
     )
@@ -867,9 +1032,26 @@ def send_event_with_lte(
                 save_to_local_queue(image_path, metadata)
                 return False
 
+        # [4.5] APN 自動検出（apn_auto_detect=True 時: MM停止→AT操作→MM再起動→再enable）
+        _apn_for_connect: Optional[str] = None
+        if not ALWAYS_ON:
+            _lte_cfg = _load_lte_config()
+            if _lte_cfg["apn_auto_detect"]:
+                _apn_for_connect = detect_apn_via_at()
+                if _apn_for_connect:
+                    logger.info("APN 自動検出: %s", _apn_for_connect)
+                    # detect_apn で MM 再起動済み → モデムインデックス再取得・再 enable
+                    modem_index = get_modem_index() or modem_index
+                    enable_modem(modem_index)
+                else:
+                    _apn_for_connect = _lte_cfg["apn_fallback"]
+                    logger.warning("APN 自動検出失敗: フォールバック %s を使用", _apn_for_connect)
+            else:
+                _apn_for_connect = _lte_cfg["apn_fallback"]
+
         # [5] APN 接続
         if not ALWAYS_ON:
-            if not connect_lte(modem_index):
+            if not connect_lte(modem_index, apn=_apn_for_connect):
                 logger.error("LTE 接続失敗: キュー保存して終了")
                 save_to_local_queue(image_path, metadata)
                 return False
