@@ -234,7 +234,7 @@ async def receive_event(
     # Video only for bear or high confidence
     _det_type = body.get_detection_type()
     _conf = body.get_confidence()
-    video_requested = (_det_type == "bear") or (_conf is not None and _conf >= 0.7)
+    video_requested = True  # TODO: Phase4でUI設定化予定
     if video_requested:
         await create_pending_video(db, str(body.event_id))
 
