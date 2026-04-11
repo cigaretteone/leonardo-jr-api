@@ -20,8 +20,15 @@ Phase 1.1対応: UUID v7 event_id, JSON POST, X-Api-Token認証, 冪等性保証
       mmcli --enable でモデムをenable状態にする。
       "Invalid transition" エラーは既にenabled状態とみなして True を返す。
 
-  connect_lte(modem_index) -> bool
-      mmcli --simple-connect で APN 接続する (APN: ppsim.jp)。
+  _load_lte_config() -> dict
+      config.json から apn_auto_detect / apn_fallback / apn_user / apn_password を読み込む。
+
+  detect_apn_via_at(at_ports, cereg_timeout) -> Optional[str]
+      ModemManager を停止して AT ポートで EPS アタッチ時のネットワーク返却 APN を検出する。
+      空 APN→CFUN=0/1→CEREG 待機→CGCONTRDP で取得。終了後 MM を再起動する。
+
+  connect_lte(modem_index, apn) -> bool
+      mmcli --simple-connect で APN 接続する。apn=None で APN 定数を使用。
 
   get_bearer_info(modem_index) -> Optional[dict]
       mmcli --bearer --output-json から IP/GW を取得する。
@@ -70,7 +77,9 @@ Phase 1.1対応: UUID v7 event_id, JSON POST, X-Api-Token認証, 冪等性保証
   [3] AI推論停止フック呼び出し（inference_pause が設定されている場合）
   [4] モデム enable（Invalid transition → 既にenabled扱いで続行）
         └─ 失敗 → ローカルキュー保存して return False
-  [5] APN 接続 simple-connect (ppsim.jp / pp@sim / jpn)
+  [4.5] APN 自動検出（apn_auto_detect=True 時）: MM停止→AT操作→MM再起動→モデム再enable
+        └─ 検出失敗 → apn_fallback を使用
+  [5] APN 接続 simple-connect（検出 APN / apn_fallback / 定数 APN の優先順）
         └─ 失敗 → ローカルキュー保存して return False
   [6] Bearer 情報取得（IP / GW）
         └─ 失敗 → ローカルキュー保存して return False
@@ -119,6 +128,9 @@ from urllib3.poolmanager import PoolManager
 # Phase 1.1: JR API のみに統一（旧 ENDPOINT_URL / BEARER_TOKEN 廃止）
 DEVICE_ID = "LJ-671493E4-QDSF"
 API_TOKEN = "m0lCjXhKXBooGZ87ty_ASxbIQh0iD_MQwrYC-CVYuNU"
+# --- Always-on mode: skip mmcli modem management (NetworkManager handles connection) ---
+ALWAYS_ON = True
+
 JR_API_URL_TEMPLATE = "https://leonardo-jr-api.onrender.com/api/v1/devices/{}/event"
 
 APN = "ppsim.jp"
@@ -141,7 +153,8 @@ class SourceIPAdapter(HTTPAdapter):
         super().__init__(**kwargs)
 
     def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
-        pool_kwargs["source_address"] = (self._source_ip, 0)
+        if self._source_ip:
+            pool_kwargs["source_address"] = (self._source_ip, 0)
         return super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
 
 # ===========================================================
@@ -191,6 +204,160 @@ def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
         return -1, "", "timeout"
     except FileNotFoundError:
         return -1, "", f"command not found: {cmd[0]}"
+
+
+# ===========================================================
+# APN 自動検出
+# ===========================================================
+
+def _load_lte_config() -> dict:
+    """config.json から LTE 接続設定を読み込む。キー不在時はデフォルト値を返す。"""
+    defaults = {
+        "apn_auto_detect": True,
+        "apn_fallback": APN,
+        "apn_user": APN_USER,
+        "apn_password": APN_PASSWORD,
+    }
+    try:
+        cfg_path = Path("/home/manta/leonardo/config.json")
+        if cfg_path.exists():
+            data = json.loads(cfg_path.read_text())
+            for k in defaults:
+                if k in data:
+                    defaults[k] = data[k]
+    except Exception as e:
+        logger.warning("config.json 読み込み失敗 (デフォルト使用): %s", e)
+    return defaults
+
+
+def detect_apn_via_at(
+    at_ports: Optional[list] = None,
+    cereg_timeout: int = 60,
+) -> Optional[str]:
+    """
+    AT コマンドでネットワーク返却 APN を自動検出する。
+
+    手順: ModemManager 停止 → AT ポート検出 → 空APN設定 → CFUN=0/1 →
+          CEREG=1 待機 → CGCONTRDP=1 → APN 取得 → MM 再起動
+    ttyUSB0 (AlertBox) は除外。at_ports=None で [ttyUSB2, ttyUSB3, ttyUSB4] を試行。
+    終了後（成功・失敗問わず）ModemManager を再起動する。
+
+    Returns: 検出した APN 文字列、失敗時は None
+    """
+    try:
+        import serial as _serial
+    except ImportError:
+        logger.error("pyserial 未インストール (pip3 install pyserial): APN自動検出スキップ")
+        return None
+
+    if at_ports is None:
+        at_ports = ["/dev/ttyUSB2", "/dev/ttyUSB3", "/dev/ttyUSB4"]
+
+    _CRLF = "\r\n"
+    _EMPTY_APN_CMD = 'AT+CGDCONT=1,"IP",""'
+
+    def _at(ser, cmd: str, wait: float = 1.5) -> str:
+        ser.write((cmd + _CRLF).encode())
+        time.sleep(wait)
+        return ser.read_all().decode(errors="ignore")
+
+    def _parse_apn(resp: str) -> Optional[str]:
+        for line in resp.splitlines():
+            if "+CGCONTRDP:" in line:
+                # +CGCONTRDP: 1,5,ppsim.jp,100.x.x.x,...
+                fields = line.split(":", 1)[-1].strip().split(",")
+                if len(fields) >= 3 and fields[2].strip():
+                    return fields[2].strip()
+        return None
+
+    # MM 停止
+    _run(["sudo", "systemctl", "stop", "ModemManager"], timeout=10)
+    time.sleep(2)
+
+    ser = None
+    detected_apn = None
+
+    try:
+        # AT ポート検出（ttyUSB2 優先、ttyUSB0 は AlertBox のため絶対除外）
+        for port in at_ports:
+            if "ttyUSB0" in port:
+                continue
+            try:
+                s = _serial.Serial(port, 115200, timeout=3)
+                time.sleep(0.3)
+                s.read_all()
+                s.write(("AT" + _CRLF).encode())
+                time.sleep(0.5)
+                resp = s.read_all().decode(errors="ignore")
+                if "OK" in resp:
+                    ser = s
+                    logger.info("AT ポート確定: %s", port)
+                    break
+                s.close()
+            except Exception:
+                continue
+
+        if ser is None:
+            logger.error("有効な AT ポートが見つかりません: %s", at_ports)
+            return None
+
+        # 空 APN 設定
+        _at(ser, _EMPTY_APN_CMD, 1.0)
+
+        # CFUN=0 (RF OFF)
+        _at(ser, "AT+CFUN=0", 5.0)
+
+        # CFUN=1 (RF ON)
+        _at(ser, "AT+CFUN=1", 10.0)
+
+        # CEREG 待機（最大 cereg_timeout 秒）
+        registered = False
+        elapsed = 0
+        while elapsed < cereg_timeout:
+            time.sleep(5)
+            elapsed += 5
+            resp = _at(ser, "AT+CEREG?", 1.0)
+            logger.debug("CEREG [%ds]: %s", elapsed, resp.strip())
+            if ",1" in resp or ",5" in resp:
+                registered = True
+                logger.info("LTE 登録成功 (%ds): %s", elapsed, resp.strip())
+                break
+
+        if not registered:
+            logger.warning("CEREG タイムアウト (%ds): APN 検出失敗", cereg_timeout)
+            return None
+
+        # ネットワーク返却 APN 取得（EPS default bearer は CEREG 登録時に自動確立）
+        resp = _at(ser, "AT+CGCONTRDP=1", 2.0)
+        detected_apn = _parse_apn(resp)
+        if detected_apn:
+            logger.info("APN 自動検出成功: %s", detected_apn)
+        else:
+            logger.warning("CGCONTRDP 応答から APN 取得失敗: %s", resp.strip())
+
+
+    except Exception as e:
+        logger.error("APN 自動検出中に例外: %s", e)
+        detected_apn = None
+    finally:
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception:
+                pass
+
+        # MM 再起動（必ず実行）
+        _run(["sudo", "systemctl", "start", "ModemManager"], timeout=10)
+        # MM がモデムを検出するまで待機（最大 15 秒）
+        for _ in range(15):
+            time.sleep(1)
+            rc, out, _ = _run(["mmcli", "-L"], timeout=5)
+            if rc == 0 and "/Modem/" in out:
+                break
+        else:
+            logger.warning("MM 再起動後のモデム検出タイムアウト")
+
+    return detected_apn
 
 
 # ===========================================================
@@ -252,17 +419,19 @@ def enable_modem(modem_index: str) -> bool:
     return False
 
 
-def connect_lte(modem_index: str) -> bool:
+def connect_lte(modem_index: str, apn: Optional[str] = None) -> bool:
     """
     mmcli --simple-connect で APN 接続する。
+    apn=None のとき定数 APN を使用する。
     # simple-connect: 平均300mA × 15秒 ≈ 1.25mAh
     Returns: 接続成功時 True
     """
+    _apn = apn if apn else APN
     rc, _, _ = _run(
         [
             "mmcli", "-m", modem_index,
             "--simple-connect",
-            f"apn={APN},user={APN_USER},password={APN_PASSWORD},allowed-auth=pap,ip-type=ipv4",
+            f"apn={_apn},user={APN_USER},password={APN_PASSWORD},allowed-auth=pap,ip-type=ipv4",
         ],
         timeout=CONNECT_TIMEOUT_SEC,
     )
@@ -313,7 +482,7 @@ def get_bearer_info(modem_index: str) -> Optional[dict]:
 
 
 def setup_network_interface(bearer: dict) -> bool:
-    ip = bearer["ip"]
+    ip = (bearer["ip"] if bearer else None)
     prefix = bearer["prefix"]
 
     gateway = bearer["gateway"]
@@ -407,8 +576,10 @@ def send_event_http(metadata: dict, wwan_ip: str) -> SendResult:
     socket.getaddrinfo = _patched_gai
 
     session = requests.Session()
-    session.mount("https://", SourceIPAdapter(wwan_ip))
-    session.mount("http://", SourceIPAdapter(wwan_ip))
+    if wwan_ip:
+        if wwan_ip:
+            session.mount("https://", SourceIPAdapter(wwan_ip))
+        session.mount("http://", SourceIPAdapter(wwan_ip))
 
     # Phase 1.1 ペイロード構築
     detection_type = metadata.get("detection_type")
@@ -423,7 +594,10 @@ def send_event_http(metadata: dict, wwan_ip: str) -> SendResult:
             "confidence": float(confidence),
             "distance_estimate": None,
         } if detection_type else None,
-        "gps": None,
+        "thumbnail_b64": metadata.get("thumbnail_b64"),
+        "gps": metadata.get("_gps"),
+        "latitude": metadata.get("latitude"),
+        "longitude": metadata.get("longitude"),
         "device_status": None,
     }
 
@@ -447,6 +621,14 @@ def send_event_http(metadata: dict, wwan_ip: str) -> SendResult:
                         "送信成功 event_id=%s status=%d",
                         payload["event_id"], resp.status_code,
                     )
+                    # Phase 2.1: parse video_requested
+                    try:
+                        resp_json = resp.json()
+                        metadata['_video_requested'] = resp_json.get('video_requested', False)
+                        metadata['_upload_url'] = resp_json.get('upload_url')
+                    except Exception:
+                        metadata['_video_requested'] = False
+                        metadata['_upload_url'] = None
                     return SendResult(acked=True, should_queue=False)
 
                 elif resp.status_code in (400, 401, 403, 422):
@@ -499,6 +681,59 @@ def send_event_http(metadata: dict, wwan_ip: str) -> SendResult:
 
 
 # ===========================================================
+
+
+# ===========================================================
+# Phase 2.1: Video upload
+# ===========================================================
+
+def upload_video_http(upload_url, video_path, sha256_hex, wwan_ip, codec="h265", resolution="480p", duration_sec=None):
+    """Upload video file to server. Returns SendResult."""
+    from urllib.parse import urlparse
+    _parsed = urlparse(upload_url)
+    _resolved = _resolve_host(_parsed.hostname)
+    def _patched_gai(host, port, family=0, type=0, proto=0, flags=0):
+        if host == _parsed.hostname:
+            host = _resolved
+        return _orig_getaddrinfo(host, port, family, type, proto, flags)
+    socket.getaddrinfo = _patched_gai
+    try:
+        session = requests.Session()
+        if wwan_ip:
+            session.mount("https://", SourceIPAdapter(wwan_ip))
+        headers = {
+            "X-Api-Token": API_TOKEN,
+            "Content-Type": "application/octet-stream",
+            "X-SHA256": sha256_hex,
+            "X-Codec": codec,
+            "X-Resolution": resolution,
+        }
+        if duration_sec is not None:
+            headers["X-Duration-Sec"] = str(duration_sec)
+        with open(video_path, "rb") as f:
+            video_data = f.read()
+        for attempt in range(MAX_RETRY):
+            headers["X-Retry-Count"] = str(attempt)
+            try:
+                resp = session.post(upload_url, data=video_data, headers=headers, timeout=60)
+                if resp.status_code in (200, 201):
+                    logger.info("Video upload success: %d", resp.status_code)
+                    return SendResult(acked=True, should_queue=False)
+                elif resp.status_code in (400, 404, 413, 403):
+                    logger.error("Video upload permanent error %d: %s", resp.status_code, resp.text[:200])
+                    return SendResult(acked=False, should_queue=False)
+                else:
+                    delay = BASE_RETRY_DELAY * (2 ** attempt)
+                    logger.warning("Video upload retry %d/%d (status=%d)", attempt+1, MAX_RETRY, resp.status_code)
+                    time.sleep(delay)
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                delay = BASE_RETRY_DELAY * (2 ** attempt)
+                logger.warning("Video upload retry %d/%d (%s)", attempt+1, MAX_RETRY, e)
+                time.sleep(delay)
+        return SendResult(acked=False, should_queue=True)
+    finally:
+        socket.getaddrinfo = _orig_getaddrinfo
+
 # [Dual Reporting 廃止] send_to_jr_api — Phase 1.1 で不要になったため無効化
 # 将来参照用にコードを残す
 # ===========================================================
@@ -628,6 +863,7 @@ def send_event_with_lte(
     occurred_at: Optional[str] = None,
     inference_pause: Optional[Callable[[], None]] = None,
     inference_resume: Optional[Callable[[], None]] = None,
+    video_path: Optional[str] = None,
 ) -> bool:
     """
     検知イベント発生時の LTE 送信エントリポイント。
@@ -672,6 +908,53 @@ def send_event_with_lte(
     if occurred_at is None:
         occurred_at = datetime.now(timezone.utc).isoformat()
 
+    # Phase 2: load GPS fix (with fallback to device_config.json)
+    _gps = None
+    try:
+        import json as _json
+        _gps_path = Path('/tmp/gnss_fix.json')
+        _gps_fallback = Path('/home/manta/leonardo_jr/device_config.json')
+        _gps_source = None
+        if _gps_path.exists():
+            _gd = _json.loads(_gps_path.read_text())
+            _gps = {'lat': _gd['latitude'], 'lon': _gd['longitude']}
+            _gps_source = 'gnss_fix'
+        elif _gps_fallback.exists():
+            _gd = _json.loads(_gps_fallback.read_text())
+            if 'latitude' in _gd and 'longitude' in _gd:
+                _gps = {'lat': _gd['latitude'], 'lon': _gd['longitude']}
+                _gps_source = 'device_config(fallback)'
+        if _gps:
+            logger.info('GPS loaded [%s]: %s,%s', _gps_source, _gps['lat'], _gps['lon'])
+        else:
+            logger.warning('GPS unavailable: no fix file found')
+    except Exception as ge:
+        logger.warning('GPS load failed: %s', ge)
+    
+    # Phase 2.1: generate thumbnail from image_path
+    _thumbnail_b64 = None
+    try:
+        import base64, os
+        if image_path and os.path.exists(image_path) and os.path.getsize(image_path) > 0:
+            with open(image_path, "rb") as img_f:
+                _thumbnail_b64 = base64.b64encode(img_f.read()).decode("ascii")
+            logger.info("Thumbnail from file: %s (%d chars)", image_path, len(_thumbnail_b64))
+    except Exception as te:
+        logger.warning("Thumbnail from file failed: %s", te)
+    if not _thumbnail_b64:
+        try:
+            import cv2
+            import numpy as np
+            import base64
+            placeholder = np.zeros((240, 320, 3), dtype=np.uint8)
+            cv2.putText(placeholder, "NO IMAGE", (60, 130),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (128, 128, 128), 2)
+            _, buf = cv2.imencode('.jpg', placeholder, [cv2.IMWRITE_JPEG_QUALITY, 50])
+            _thumbnail_b64 = base64.b64encode(buf).decode('ascii')
+            logger.info("Thumbnail fallback: placeholder generated (%d chars)", len(_thumbnail_b64))
+        except Exception as fb_err:
+            logger.warning("Thumbnail fallback also failed: %s", fb_err)
+
     metadata: dict = {
         "event_id": str(event_id),
         "device_id": DEVICE_ID,
@@ -679,8 +962,43 @@ def send_event_with_lte(
         "occurred_at": occurred_at,
         "detection_type": detection_type,
         "confidence": round(float(confidence), 4),
+        "thumbnail_b64": _thumbnail_b64,
+        "_gps": _gps,
+        "latitude": _gps["lat"] if _gps else None,
+        "longitude": _gps["lon"] if _gps else None,
     }
 
+    # ── Alert Box: immediate audio warning (async) ──
+    import threading
+    _alert_result = {'ok': False, 'done': False}
+
+    def _alert_thread(det_type):
+        try:
+            from alertbox import alert_bear, alert_animal
+            if det_type == 'bear':
+                resp = alert_bear()
+                if resp:
+                    _alert_result['ok'] = True
+                    logger.info('Alert Box: BEAR OK (%s)', resp)
+                else:
+                    logger.warning('Alert Box: BEAR failed (timeout/no response)')
+            elif det_type in ('deer', 'boar', 'bird'):
+                resp = alert_animal()
+                if resp:
+                    _alert_result['ok'] = True
+                    logger.info('Alert Box: ANIMAL OK (%s)', resp)
+                else:
+                    logger.warning('Alert Box: ANIMAL failed (timeout/no response)')
+            else:
+                _alert_result['ok'] = True
+        except Exception as ab_err:
+            logger.warning('Alert Box error (non-fatal): %s', ab_err)
+        finally:
+            _alert_result['done'] = True
+
+    _alert_t = threading.Thread(target=_alert_thread, args=(detection_type,), daemon=True)
+    _alert_t.start()
+    
     modem_index: Optional[str] = None
 
     try:
@@ -702,49 +1020,115 @@ def send_event_with_lte(
             save_to_local_queue(image_path, metadata)
             return False
 
+        bearer = None  # ALWAYS_ON: initialize to avoid UnboundLocalError
         # [3] AI 推論停止フック（LTE 通信中は推論を停止する）
         if inference_pause:
             inference_pause()
 
         # [4] モデム enable
-        if not enable_modem(modem_index):
-            logger.error("モデム enable 失敗: キュー保存して終了")
-            save_to_local_queue(image_path, metadata)
-            return False
+        if not ALWAYS_ON:
+            if not enable_modem(modem_index):
+                logger.error("モデム enable 失敗: キュー保存して終了")
+                save_to_local_queue(image_path, metadata)
+                return False
+
+        # [4.5] APN 自動検出（apn_auto_detect=True 時: MM停止→AT操作→MM再起動→再enable）
+        _apn_for_connect: Optional[str] = None
+        if not ALWAYS_ON:
+            _lte_cfg = _load_lte_config()
+            if _lte_cfg["apn_auto_detect"]:
+                _apn_for_connect = detect_apn_via_at()
+                if _apn_for_connect:
+                    logger.info("APN 自動検出: %s", _apn_for_connect)
+                    # detect_apn で MM 再起動済み → モデムインデックス再取得・再 enable
+                    modem_index = get_modem_index() or modem_index
+                    enable_modem(modem_index)
+                else:
+                    _apn_for_connect = _lte_cfg["apn_fallback"]
+                    logger.warning("APN 自動検出失敗: フォールバック %s を使用", _apn_for_connect)
+            else:
+                _apn_for_connect = _lte_cfg["apn_fallback"]
 
         # [5] APN 接続
-        if not connect_lte(modem_index):
-            logger.error("LTE 接続失敗: キュー保存して終了")
-            save_to_local_queue(image_path, metadata)
-            return False
+        if not ALWAYS_ON:
+            if not connect_lte(modem_index, apn=_apn_for_connect):
+                logger.error("LTE 接続失敗: キュー保存して終了")
+                save_to_local_queue(image_path, metadata)
+                return False
 
         # [6a] Bearer 情報取得
-        bearer = get_bearer_info(modem_index)
-        if bearer is None:
-            logger.error("Bearer 情報取得失敗: キュー保存して終了")
-            save_to_local_queue(image_path, metadata)
-            return False
+        if not ALWAYS_ON:
+            bearer = get_bearer_info(modem_index)
+            if bearer is None:
+                logger.error("Bearer 情報取得失敗: キュー保存して終了")
+                save_to_local_queue(image_path, metadata)
+                return False
 
         # [6b] ネットワーク設定（IP 付与・デフォルトルート）
-        if not setup_network_interface(bearer):
-            logger.error("ネットワーク設定失敗: キュー保存して終了")
+        if not ALWAYS_ON:
+            if not setup_network_interface(bearer):
+                logger.error("ネットワーク設定失敗: キュー保存して終了")
             save_to_local_queue(image_path, metadata)
             return False
 
         # [7] 未送信キューを先に再送（最大 limit=3 件）
         pending = load_local_queue()
         if pending:
-            sent = process_local_queue(wwan_ip=bearer["ip"])
+            sent = process_local_queue(wwan_ip=(bearer["ip"] if bearer else None))
             logger.info("キュー再送: %d 件成功（キュー残: %d 件）", sent, len(pending) - sent)
 
         # [8] 本イベント送信（event_id は metadata に含まれる）
-        result = send_event_http(metadata, bearer["ip"])
+        result = send_event_http(metadata, (bearer["ip"] if bearer else None))
 
         if result.acked:
             logger.info(
                 "送信成功: event_id=%s detection_type=%s confidence=%.2f",
                 metadata["event_id"], detection_type, confidence,
             )
+            # Phase 2.1: video upload if requested
+            if metadata.get('_video_requested') and metadata.get('_upload_url'):
+                try:
+                    import hashlib
+                    v_path = None
+                    v_sha = None
+                    v_size = 0
+                    # Use provided video_path if available, else try ring buffer
+                    if video_path and os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+                        v_path = video_path
+                        with open(v_path, 'rb') as vf:
+                            v_sha = hashlib.sha256(vf.read()).hexdigest()
+                        v_size = os.path.getsize(v_path)
+                        logger.info('Video from app: %s (%d bytes)', v_path, v_size)
+                    else:
+                        try:
+                            from video_slicer import slice_video, cleanup_slice
+                            v_path, v_sha, v_size = slice_video(metadata['event_id'])
+                        except Exception:
+                            pass
+                    if v_path and v_sha:
+                        logger.info('Video ready: %s (%d bytes)', v_path, v_size)
+                        v_result = upload_video_http(
+                            metadata['_upload_url'], v_path, v_sha, (bearer['ip'] if bearer else None)
+                        )
+                        if v_result.acked:
+                            logger.info('Video uploaded: event_id=%s', metadata['event_id'])
+                            metadata['_vid_ok'] = True
+                            try:
+                                cleanup_slice(metadata['event_id'])
+                            except NameError:
+                                pass
+                        else:
+                            logger.warning('Video upload failed: event_id=%s', metadata['event_id'])
+                    else:
+                        logger.warning('Video slice failed, skipping upload')
+                except Exception as ve:
+                    logger.error('Video pipeline error: %s', ve)
+            logger.info('EVENT_SUMMARY id=%s type=%s conf=%.2f img=%d vid=%d alert=%d gps=%d send=1',
+                metadata['event_id'], detection_type, confidence,
+                1 if metadata.get('thumbnail_b64') else 0,
+                1 if metadata.get('_vid_ok') else 0,
+                1 if (_alert_t.join(timeout=5) or True) and _alert_result['ok'] else 0,
+                1 if metadata.get('_gps') else 0)
             return True
         elif result.should_queue:
             logger.error("送信失敗（一時エラー）: キュー保存")
@@ -769,8 +1153,10 @@ def send_event_with_lte(
     finally:
         # [9] 切断・disable・ネットワーク削除（常に実行）
         if modem_index is not None:
-            disconnect_lte(modem_index)
-            disable_modem(modem_index)
+            if not ALWAYS_ON:
+                disconnect_lte(modem_index)
+            if not ALWAYS_ON:
+                disable_modem(modem_index)
         teardown_network_interface()
         # AI 推論再開フック（LTE 通信完了後に推論を再開する）
         if inference_resume:
@@ -1427,12 +1813,21 @@ def main() -> None:
         _run_tests()
         return
 
-    # ダミー画像作成（実際はカメラキャプチャ画像を指定）
+    # ダミー画像作成（OpenCVで読める有効なJPEG）
     image_file = "/tmp/lte_test_event.jpg"
     if not Path(image_file).exists():
-        with open(image_file, "wb") as f:
-            f.write(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"\x00" * 512)
-        print(f"ダミー画像作成: {image_file}")
+        try:
+            import cv2
+            import numpy as np
+            dummy = np.zeros((240, 320, 3), dtype=np.uint8)
+            cv2.putText(dummy, "TEST", (100, 130),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 2)
+            cv2.imwrite(image_file, dummy)
+            print(f"ダミー画像作成(OpenCV): {image_file}")
+        except ImportError:
+            with open(image_file, "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"\x00" * 512)
+            print(f"ダミー画像作成(raw): {image_file}")
 
     print("LTE 送信開始...")
     success = send_event_with_lte(

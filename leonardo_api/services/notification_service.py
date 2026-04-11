@@ -88,11 +88,83 @@ def _send_email_sync(to_email: str, subject: str, body: str) -> bool:
         return False
 
 
+
+
+async def _send_line_message(user_id: str, message: str) -> bool:
+    """LINE Messaging API Push Message."""
+    token = settings.LINE_CHANNEL_ACCESS_TOKEN
+    if not token:
+        logger.warning("LINE_CHANNEL_ACCESS_TOKEN not set")
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.line.me/v2/bot/message/push",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "to": user_id,
+                    "messages": [{"type": "text", "text": message}],
+                },
+            )
+        if resp.status_code == 200:
+            logger.info("LINE message sent to %s", user_id[:10])
+            return True
+        logger.warning("LINE send failed (status=%d): %s", resp.status_code, resp.text)
+        return False
+    except Exception as e:
+        logger.error("LINE send error: %s", e)
+        return False
+
+# ── Twilio phone call ───────────────────────────────────
+import time as _time
+_last_call_time = 0
+CALL_COOLDOWN_SEC = 300
+EMAIL_COOLDOWN_SEC = 120
+_last_email_times = {}
+
+def _make_phone_call(to_phone, detection_type, confidence, device_id, latitude=None, longitude=None):
+    global _last_call_time
+    if _time.time() - _last_call_time < CALL_COOLDOWN_SEC:
+        logger.info("Phone call skipped: cooldown (%ds left)", int(CALL_COOLDOWN_SEC - (_time.time() - _last_call_time)))
+        return False
+    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
+        logger.warning("Twilio not configured")
+        return False
+    try:
+        from twilio.rest import Client
+        client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+        label = {"bear": "\u718a", "person": "\u4eba"}.get(detection_type, detection_type)
+        conf_pct = int(confidence * 100)
+        loc = ""
+        if latitude and longitude:
+            loc = f". GPS {latitude:.4f}, {longitude:.4f}"
+        twiml = (
+            '<Response><Say language="ja-JP" voice="alice">'
+            f'Leonardo Jr {label}検知アラート。'
+            f'信頼度 {conf_pct} パーセント。'
+            f'繰り返します。{label}を検知しました。'
+            f'必要に応じてメールやアプリでご確認ください。'
+            '</Say></Response>'
+        )
+        call = client.calls.create(twiml=twiml, to=to_phone, from_=settings.TWILIO_FROM_NUMBER)
+        _last_call_time = _time.time()
+        logger.info("Phone call initiated: to=%s sid=%s", to_phone, call.sid)
+        return True
+    except Exception as e:
+        logger.error("Phone call failed: %s", e)
+        return False
+
 async def send_detection_notification(
     notification_target_json: str | None,
     device_id: str,
     detection_type: str,
     confidence: float,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    occurred_at=None,
 ) -> None:
     """
     検知イベントを所有者に通知する。
@@ -105,25 +177,85 @@ async def send_detection_notification(
         logger.debug("通知先が未設定のためスキップ (device_id=%s)", device_id)
         return
 
-    label = {"bear": "熊", "human": "人", "vehicle": "車両"}.get(detection_type, detection_type)
+    label = {"bear": "熊", "person": "人", "human": "人", "vehicle": "車両"}.get(detection_type, detection_type)
+    # Format time in JST
+    time_str = "不明"
+    if occurred_at:
+        try:
+            from datetime import timezone, timedelta
+            jst = timezone(timedelta(hours=9))
+            jst_time = occurred_at.astimezone(jst)
+            time_str = jst_time.strftime("%Y/%m/%d %H:%M:%S JST")
+        except Exception:
+            time_str = str(occurred_at)
+    # GPS info
+    gps_str = "不明"
+    map_link = ""
+    if latitude and longitude:
+        gps_str = f"{latitude:.6f}, {longitude:.6f}"
+        map_link = f"https://maps.google.com/maps?q={latitude},{longitude}"
     message = (
         f"\n【Leonardo Jr. 検知アラート】\n"
         f"デバイス: {device_id}\n"
         f"検知対象: {label}\n"
-        f"信頼度: {confidence * 100:.1f}%"
+        f"信頼度: {confidence * 100:.1f}%\n"
+        f"検知時刻: {time_str}\n"
+        f"GPS座標: {gps_str}\n"
+        + (f"地図: {map_link}\n" if map_link else "")
     )
 
     if line_token := target.get("line_token"):
         await _send_line_notify(line_token, message)
 
     if email := target.get("email"):
-        import asyncio
-        await asyncio.to_thread(
-            _send_email_sync,
-            email,
-            f"【Leonardo Jr.】{label}を検知しました",
-            message,
+      if target.get("email_enabled", True) is False:
+        logger.info("Email disabled by user settings")
+        email = None
+    if email:
+        _em_now = _time.time()
+        _em_last = _last_email_times.get(device_id, 0)
+        if _em_now - _em_last >= EMAIL_COOLDOWN_SEC:
+            _last_email_times[device_id] = _em_now
+            import asyncio
+            await asyncio.to_thread(
+                _send_email_sync,
+                email,
+                f"【Leonardo Jr.】{label}を検知しました",
+                message,
+            )
+        else:
+            logger.info("Email cooldown active (%ds left)", int(EMAIL_COOLDOWN_SEC - (_em_now - _em_last)))
+
+
+    # ── LINE Messaging API (immediate) ──
+    if line_uid := target.get("line_user_id"):
+      if target.get("line_enabled", True) is False:
+        logger.info("LINE disabled by user settings")
+        line_uid = None
+    if line_uid:
+        map_link = f"https://maps.google.com/maps?q={latitude},{longitude}" if latitude and longitude else ""
+        line_msg = (
+            f"\u3010Leonardo Jr.\u3011\n"
+            f"{label}\u3092\u691c\u77e5\u3057\u307e\u3057\u305f\n"
+            f"\u4fe1\u983c\u5ea6: {confidence * 100:.0f}%\n"
+            f"\u6642\u523b: {time_str}\n"
+            + (f"\u5730\u56f3: {map_link}\n" if map_link else "")
+            + f"\n\u25b6 \u78ba\u8a8d: https://leonardo-jr-api.onrender.com/events"
         )
+        await _send_line_message(line_uid, line_msg)
+
+    # ── Phone call (bear only, 5min cooldown) ──
+    if phone := target.get("phone"):
+      if target.get("call_enabled", True) is False:
+        logger.info("Phone call disabled by user settings")
+        phone = None
+    if phone:
+        if detection_type in ("bear",):
+            import asyncio
+            await asyncio.to_thread(
+                _make_phone_call, phone, detection_type, confidence,
+                device_id, latitude, longitude,
+            )
 
 
 async def send_mismatch_alert(
@@ -154,6 +286,10 @@ async def send_mismatch_alert(
         await _send_line_notify(line_token, message)
 
     if email := target.get("email"):
+      if target.get("email_enabled", True) is False:
+        logger.info("Email disabled by user settings")
+        email = None
+    if email:
         import asyncio
         await asyncio.to_thread(
             _send_email_sync,

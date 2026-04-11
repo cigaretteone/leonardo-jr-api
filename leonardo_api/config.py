@@ -1,3 +1,4 @@
+import os
 """
 config.py — アプリケーション設定
 
@@ -46,6 +47,11 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
     SMTP_FROM: str = "noreply@leonardo-jr.jp"
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_FROM_NUMBER: str = ""
+    LINE_CHANNEL_ACCESS_TOKEN: str = ""
+    LINE_USER_ID: str = ""
 
     # -------------------------------------------------------------------------
     # IPジオロケーション
@@ -67,7 +73,7 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-MEDIA_STORAGE_PATH = "/tmp/media"
+MEDIA_STORAGE_PATH = os.environ.get("MEDIA_STORAGE_PATH", "/var/data/media")
 THUMBNAIL_SUBDIR = "thumbnails"
 VIDEO_SUBDIR = "videos"
 MAX_THUMBNAIL_SIZE = 200_000

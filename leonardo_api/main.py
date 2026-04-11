@@ -50,7 +50,35 @@ app.include_router(media_router.router, prefix="/api/v1/devices", tags=["メデ�
 
 @app.get("/health", tags=["ヘルスチェック"])
 async def health() -> dict:
-    return {"status": "ok"}
+    import os
+    from datetime import datetime, timezone
+    from sqlalchemy import select, func
+    from .database import get_db_context
+    from .models import DetectionEvent, EventMedia
+    from .config import MEDIA_STORAGE_PATH
+    status = "ok"
+    details = {}
+    try:
+        async with get_db_context() as db:
+            total = (await db.execute(select(func.count()).select_from(DetectionEvent))).scalar() or 0
+            details["total_events"] = total
+            last = (await db.execute(select(DetectionEvent.occurred_at).order_by(DetectionEvent.occurred_at.desc()).limit(1))).scalar()
+            details["last_event_at"] = last.isoformat() if last else None
+            media_count = (await db.execute(select(func.count()).select_from(EventMedia).where(EventMedia.upload_status == "completed"))).scalar() or 0
+            details["media_files"] = media_count
+            details["db"] = "connected"
+    except Exception as e:
+        status = "degraded"
+        details["db"] = f"error: {e}"
+    try:
+        if os.path.exists(MEDIA_STORAGE_PATH):
+            total_size = sum(os.path.getsize(os.path.join(dp, f)) for dp, dn, fns in os.walk(MEDIA_STORAGE_PATH) for f in fns)
+            details["media_disk_mb"] = round(total_size / 1048576, 1)
+            details["media_disk_max_mb"] = 10240
+    except Exception:
+        pass
+    details["server_time"] = datetime.now(timezone.utc).isoformat()
+    return {"status": status, **details}
 
 
 # ---------------------------------------------------------------------------

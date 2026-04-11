@@ -1,0 +1,14 @@
+[Unit]
+Description=Leonardo Jr Alert Box Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/manta/leonardo-jr-api
+ExecStart=/usr/bin/python3 /home/manta/leonardo-jr-api/alertbox_daemon.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

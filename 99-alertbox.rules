@@ -1,0 +1,2 @@
+# Leonardo Jr Alert Box (Arduino Nano + FT232)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="A5069RR4", SYMLINK+="alertbox", MODE="0666"

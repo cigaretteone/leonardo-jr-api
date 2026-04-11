@@ -231,7 +231,10 @@ async def receive_event(
         await save_thumbnail(db, str(body.event_id), device_id, thumbnail_b64)
 
     # ── Step 5d: 動画リクエスト判定 (Phase 2.1: 常にtrue) ──
-    video_requested = True
+    # Video only for bear or high confidence
+    _det_type = body.get_detection_type()
+    _conf = body.get_confidence()
+    video_requested = True  # TODO: Phase4でUI設定化予定
     if video_requested:
         await create_pending_video(db, str(body.event_id))
 
@@ -244,6 +247,9 @@ async def receive_event(
             device_id,
             body.get_detection_type(),
             body.get_confidence(),
+            latitude=float(body.latitude) if body.latitude else None,
+            longitude=float(body.longitude) if body.longitude else None,
+            occurred_at=body.occurred_at,
         )
         if mismatch:
             await send_mismatch_alert(
@@ -321,11 +327,140 @@ async def list_events(
             "confidence": float(ev.confidence) if ev.confidence else None,
             "occurred_at": ev.occurred_at.isoformat() if ev.occurred_at else None,
             "received_at": ev.received_at.isoformat() if ev.received_at else None,
+            "latitude": float(ev.latitude) if ev.latitude else None,
+            "longitude": float(ev.longitude) if ev.longitude else None,
             "location_mismatch": ev.location_mismatch,
             "media": media_list,
         })
 
     return {"events": out, "count": len(out)}
+
+
+
+# =============================================================================
+# DELETE /{device_id}/events — Delete ALL events for device
+# =============================================================================
+@router.delete(
+    "/{device_id}/events",
+    status_code=status.HTTP_200_OK,
+    summary="Delete all events for device",
+)
+async def delete_all_events(
+    device_id: str,
+    device: Annotated[Device, Depends(get_device_by_api_token)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    if device.device_id != device_id:
+        raise HTTPException(status_code=400, detail="device_id mismatch")
+
+    import os
+    from pathlib import Path
+    from sqlalchemy import select, delete as sql_delete, func
+    from ..config import MEDIA_STORAGE_PATH
+    from ..models import DetectionEvent, EventMedia
+
+    # Count events
+    count_stmt = select(func.count()).select_from(DetectionEvent).where(
+        DetectionEvent.device_id == device_id
+    )
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    # Delete all media files
+    media_stmt = select(EventMedia).join(
+        DetectionEvent, DetectionEvent.event_id == EventMedia.event_id
+    ).where(DetectionEvent.device_id == device_id)
+    media_result = await db.execute(media_stmt)
+    for m in media_result.scalars().all():
+        if m.storage_path:
+            fpath = Path(MEDIA_STORAGE_PATH) / m.storage_path
+            if fpath.exists():
+                fpath.unlink()
+
+    # Get all event_ids for this device
+    eid_stmt = select(DetectionEvent.event_id).where(
+        DetectionEvent.device_id == device_id
+    )
+    eid_result = await db.execute(eid_stmt)
+    event_ids = [r[0] for r in eid_result.fetchall()]
+
+    if event_ids:
+        # Delete media records
+        await db.execute(
+            sql_delete(EventMedia).where(EventMedia.event_id.in_(event_ids))
+        )
+        # Delete delivery records
+        try:
+            from ..models import EventDelivery
+            await db.execute(
+                sql_delete(EventDelivery).where(EventDelivery.event_id.in_(event_ids))
+            )
+        except Exception:
+            pass
+        # Delete events
+        await db.execute(
+            sql_delete(DetectionEvent).where(DetectionEvent.device_id == device_id)
+        )
+
+    await db.commit()
+    return {"deleted": total}
+
+# =============================================================================
+# DELETE /{device_id}/events/{event_id} — Delete single event + media
+# =============================================================================
+@router.delete(
+    "/{device_id}/events/{event_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete event and associated media",
+)
+async def delete_event(
+    device_id: str,
+    event_id: str,
+    device: Annotated[Device, Depends(get_device_by_api_token)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    if device.device_id != device_id:
+        raise HTTPException(status_code=400, detail="device_id mismatch")
+
+    from pathlib import Path
+    from sqlalchemy import select, delete as sql_delete
+    from ..config import MEDIA_STORAGE_PATH
+    from ..models import DetectionEvent, EventMedia
+
+    # Check event exists
+    evt_stmt = select(DetectionEvent).where(
+        DetectionEvent.event_id == event_id,
+        DetectionEvent.device_id == device_id,
+    )
+    evt_result = await db.execute(evt_stmt)
+    evt = evt_result.scalar_one_or_none()
+    if evt is None:
+        raise HTTPException(status_code=404, detail="event_not_found")
+
+    # Delete media files from disk
+    media_stmt = select(EventMedia).where(EventMedia.event_id == event_id)
+    media_result = await db.execute(media_stmt)
+    media_rows = media_result.scalars().all()
+    for m in media_rows:
+        if m.storage_path:
+            fpath = Path(MEDIA_STORAGE_PATH) / m.storage_path
+            if fpath.exists():
+                fpath.unlink()
+
+    # Delete media records
+    await db.execute(sql_delete(EventMedia).where(EventMedia.event_id == event_id))
+
+    # Delete event delivery records if they exist
+    try:
+        from ..models import EventDelivery
+        await db.execute(sql_delete(EventDelivery).where(EventDelivery.event_id == event_id))
+    except Exception:
+        pass
+
+    # Delete event record
+    await db.execute(sql_delete(DetectionEvent).where(DetectionEvent.event_id == event_id))
+    await db.commit()
+
+    return None
 
 # =============================================================================
 # GET /{device_id}/status (変更なし)

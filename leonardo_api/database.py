@@ -52,3 +52,10 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
         finally:
             await session.close()
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def get_db_context():
+    async with AsyncSessionLocal() as session:
+        yield session

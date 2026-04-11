@@ -23,8 +23,8 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 .el{display:flex;flex-direction:column;gap:.8rem}
 .ec{background:var(--surface);border:1px solid var(--border);border-radius:10px;display:flex;overflow:hidden;transition:border-color .2s}
 .ec:hover{border-color:#06b6d4}
-.et{width:160px;min-height:120px;background:var(--surface2);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden}
-.et img{width:100%;height:100%;object-fit:cover}
+.et{width:200px;min-height:150px;background:var(--surface2);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden}
+.et img{width:100%;height:100%;object-fit:contain;background:#0a0e17}
 .ni{font-family:var(--mono);font-size:.7rem;color:var(--text2);text-align:center;padding:.5rem}
 .eb{padding:1rem;flex:1;display:flex;flex-direction:column;gap:.4rem}
 .etype{font-family:var(--mono);font-size:.82rem;font-weight:700;display:flex;align-items:center;gap:.5rem}
@@ -42,13 +42,21 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 .empty{text-align:center;padding:3rem;color:var(--text2);font-family:var(--mono)}
 .rbtn{font-family:var(--mono);font-size:.75rem;color:var(--accent);background:none;border:1px solid var(--border);border-radius:6px;padding:.4rem .8rem;cursor:pointer;transition:all .2s}
 .rbtn:hover{border-color:var(--accent);background:rgba(34,211,238,.1)}
+.dbtn{font-family:var(--mono);font-size:.7rem;color:var(--red);background:none;border:1px solid rgba(248,113,113,.3);border-radius:4px;padding:.2rem .5rem;cursor:pointer;transition:all .2s;margin-top:.4rem}
+.dbtn:hover{border-color:var(--red);background:rgba(248,113,113,.15)}
+.minimap{width:280px;height:160px;border-radius:6px;border:1px solid var(--border);margin-top:6px}
 .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
 @media(max-width:640px){.header{padding:1rem;flex-direction:column;gap:.5rem}.content{padding:1rem}.ec{flex-direction:column}.et{width:100%;height:160px}}
+#mapbox{height:300px;border-radius:10px;border:1px solid var(--border);margin-bottom:1rem;z-index:1}
+.leaflet-popup-content{font-family:var(--mono);font-size:.8rem;color:#333}
 </style>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
 <body>
 <div class="header">
 <h1>LEONARDO JR. <span>// EVENT VIEWER</span></h1>
+<div style='font-family:var(--mono);font-size:.95rem;color:var(--accent);letter-spacing:.15em;margin-top:.3rem;font-weight:600'>EDAS <span style="font-weight:400;font-size:.75rem;color:var(--text2)">&mdash; Edge-Driven Analytics System</span></div>
 <div class="status-bar"><span><span class="dot"></span> ONLINE</span><span id="clock"></span></div>
 </div>
 <div class="content">
@@ -60,7 +68,9 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 <div class="sc"><div class="lb">Media</div><div class="vl" style="color:var(--green)" id="s-media">-</div></div>
 </div>
 <button class="rbtn" onclick="loadEvents()" style="margin-left:1rem">REFRESH</button>
+<button class="rbtn" onclick="deleteAll()" style="margin-left:.5rem;color:var(--red);border-color:rgba(248,113,113,.3)">DELETE ALL</button>
 </div>
+<div id="mapbox"></div>
 <div class="el" id="elist"><div class="empty">Loading events...</div></div>
 </div>
 <script>
@@ -75,6 +85,31 @@ function fmtTime(iso){
 function cc(c){if(c>=0.8)return'var(--green)';if(c>=0.6)return'var(--amber)';return'var(--red)'}
 function dc(t){if(!t)return'db-other';var s=t.toLowerCase();if(s.indexOf('bear')>=0)return'db-bear';if(s.indexOf('person')>=0||s.indexOf('human')>=0)return'db-person';return'db-other'}
 
+function deleteAll(){
+  if(!confirm('DELETE ALL EVENTS? This cannot be undone.'))return;
+  if(!confirm('Are you sure? ALL events, thumbnails and videos will be permanently deleted.'))return;
+  var xhr=new XMLHttpRequest();
+  xhr.open('DELETE',API+'/api/v1/devices/'+DID+'/events');
+  xhr.setRequestHeader('X-Api-Token',TKN);
+  xhr.onload=function(){
+    if(xhr.status===200){var d=JSON.parse(xhr.responseText);alert('Deleted '+d.deleted+' events');loadEvents()}
+    else{alert('Delete all failed: '+xhr.status)}
+  };
+  xhr.onerror=function(){alert('Network error')};
+  xhr.send();
+}
+function deleteEvent(eid){
+  if(!confirm('Delete this event? This cannot be undone.'))return;
+  var xhr=new XMLHttpRequest();
+  xhr.open('DELETE',API+'/api/v1/devices/'+DID+'/events/'+eid);
+  xhr.setRequestHeader('X-Api-Token',TKN);
+  xhr.onload=function(){
+    if(xhr.status===204||xhr.status===200){loadEvents()}
+    else{alert('Delete failed: '+xhr.status)}
+  };
+  xhr.onerror=function(){alert('Network error')};
+  xhr.send();
+}
 function loadEvents(){
   var el=document.getElementById('elist');
   el.innerHTML='<div class="empty">Loading...</div>';
@@ -95,6 +130,35 @@ function loadEvents(){
     document.getElementById('s-bear').textContent=bc;
     document.getElementById('s-person').textContent=pc;
     document.getElementById('s-media').textContent=mc;
+
+    // Map
+    if(!window._map){
+      window._map=L.map('mapbox').setView([35.05,136.99],12);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+        attribution:'&copy; OpenStreetMap',maxZoom:18
+      }).addTo(window._map);
+      window._markers=L.layerGroup().addTo(window._map);
+    }
+    window._markers.clearLayers();
+    var bounds=[];
+    for(var i=0;i<evts.length;i++){
+      var ev=evts[i];
+      if(ev.latitude&&ev.longitude){
+        var clr=ev.detection_type==='bear'?'red':'orange';
+        var mk=L.circleMarker([ev.latitude,ev.longitude],{
+          radius:8,fillColor:clr,color:'#fff',weight:2,fillOpacity:0.8
+        });
+        var pLabel=(ev.detection_type||'unknown').toUpperCase();
+        var pConf=Math.round((ev.confidence||0)*100);
+        var pTime=fmtTime(ev.occurred_at);
+        var mapUrl='https://maps.google.com/maps?q='+ev.latitude+','+ev.longitude;
+        mk.bindPopup('<b>'+pLabel+'</b> '+pConf+'%<br>'+pTime+'<br><a href="'+mapUrl+'" target="_blank">Google Maps</a>');
+        mk.addTo(window._markers);
+        bounds.push([ev.latitude,ev.longitude]);
+      }
+    }
+    if(bounds.length>0)window._map.fitBounds(bounds,{padding:[30,30],maxZoom:15});
+
     if(evts.length===0){el.innerHTML='<div class="empty">No events yet</div>';return}
     var html='';
     for(var i=0;i<evts.length;i++){
@@ -122,11 +186,31 @@ function loadEvents(){
       html+='<div class="econf">Confidence: '+cp+'%<span class="cbar"><span class="cfill" style="width:'+cp+'%;background:'+color+'"></span></span></div>';
       html+='<div class="em">'+fmtTime(ev.occurred_at)+'</div>';
       html+='<div class="em" style="font-size:.68rem">ID: '+ev.event_id.substring(0,18)+'...</div>';
+      if(ev.latitude&&ev.longitude){
+        var mUrl='https://maps.google.com/maps?q='+ev.latitude+','+ev.longitude;
+        html+='<div class="em" style="font-size:.7rem"><a href="'+mUrl+'" target="_blank" style="color:var(--accent);text-decoration:none">&#x1F4CD; '+ev.latitude.toFixed(5)+', '+ev.longitude.toFixed(5)+'</a></div>';
+        html+='<div class="minimap" id="mmap-'+ev.event_id+'"></div>';
+      }
       if(tags)html+='<div class="mt">'+tags+'</div>';
       if(hasVideo){var vUrl=API+'/api/v1/devices/'+DID+'/events/'+ev.event_id+'/video?token='+TKN;html+='<div style="margin-top:6px"><video controls preload="none" style="width:100%;max-width:320px;border-radius:6px;border:1px solid #1e2d45"><source src="'+vUrl+'" type="video/mp4"></video></div>';}
+      html+='<button class="dbtn" onclick="deleteEvent(\''+ev.event_id+'\')">&times; DELETE</button>';
       html+='</div></div>';
     }
     el.innerHTML=html;
+    // Initialize mini maps
+    for(var i=0;i<evts.length;i++){
+      var ev=evts[i];
+      if(ev.latitude&&ev.longitude){
+        var mid="mmap-"+ev.event_id;
+        var mel=document.getElementById(mid);
+        if(mel){
+          var mm=L.map(mid,{zoomControl:false,attributionControl:false,dragging:false,scrollWheelZoom:false}).setView([ev.latitude,ev.longitude],14);
+          L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18}).addTo(mm);
+          var clr=ev.detection_type==="bear"?"red":"orange";
+          L.circleMarker([ev.latitude,ev.longitude],{radius:8,fillColor:clr,color:"#fff",weight:2,fillOpacity:0.9}).addTo(mm);
+        }
+      }
+    }
   };
   xhr.onerror=function(){el.innerHTML='<div class="empty">Network error</div>'};
   xhr.send();
