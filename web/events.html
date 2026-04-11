@@ -123,7 +123,7 @@ function loadEvents(){
       html+='<div class="em">'+fmtTime(ev.occurred_at)+'</div>';
       html+='<div class="em" style="font-size:.68rem">ID: '+ev.event_id.substring(0,18)+'...</div>';
       if(tags)html+='<div class="mt">'+tags+'</div>';
-      if(hasVideo){var vUrl=API+'/api/v1/devices/events/'+ev.event_id+'/video';html+='<div style="margin-top:6px"><video controls preload="none" style="width:100%;max-width:320px;border-radius:6px;border:1px solid #1e2d45"><source src="'+vUrl+'" type="video/mp4"></video></div>';}
+      if(hasVideo){var vUrl=API+'/api/v1/devices/'+DID+'/events/'+ev.event_id+'/video?token='+TKN;html+='<div style="margin-top:6px"><video controls preload="none" style="width:100%;max-width:320px;border-radius:6px;border:1px solid #1e2d45"><source src="'+vUrl+'" type="video/mp4"></video></div>';}
       html+='</div></div>';
     }
     el.innerHTML=html;

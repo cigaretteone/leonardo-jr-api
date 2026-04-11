@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -123,17 +123,31 @@ async def upload_video(
 
 
 # =============================================================================
-# GET /events/{event_id}/video — 動画取得（ダッシュボード用）
+# GET /{device_id}/events/{event_id}/video — 動画取得（ダッシュボード用）
 # =============================================================================
 
 @router.get(
-    "/events/{event_id}/video",
+    "/{device_id}/events/{event_id}/video",
     summary="動画取得",
 )
 async def get_video(
+    device_id: str,
     event_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
+    token: str | None = Query(default=None),
+    x_api_token: str | None = Header(default=None),
 ):
+    # ?token= クエリパラメータ、または X-Api-Token ヘッダーで認証
+    raw_token = token or x_api_token
+    if raw_token is None:
+        raise HTTPException(status_code=401, detail="認証トークンが必要です")
+    result = await db.execute(select(Device).where(Device.api_token == raw_token))
+    device = result.scalar_one_or_none()
+    if device is None:
+        raise HTTPException(status_code=401, detail="デバイストークンが無効です")
+    if device.device_id != device_id:
+        raise HTTPException(status_code=403, detail="device_id mismatch")
+
     rel_path = await get_media_path(db, event_id, "video")
     if rel_path is None:
         raise HTTPException(status_code=404, detail="video not found")
