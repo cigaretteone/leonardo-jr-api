@@ -986,26 +986,41 @@ def send_event_with_lte(
     if occurred_at is None:
         occurred_at = datetime.now(timezone.utc).isoformat()
 
-    # Phase 2: load GPS fix (with fallback to device_config.json)
+    # Sprint GPS信頼性改修 (2026-04-19):
+    # /tmp/gnss_fix.json の status=timeout 判定 + 24h 経過判定を追加。
+    # device_config.json フォールバックは廃止 (ポリシー: 古い座標より null 優先)。
     _gps = None
     try:
         import json as _json
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         _gps_path = Path('/tmp/gnss_fix.json')
-        _gps_fallback = Path('/home/manta/leonardo_jr/device_config.json')
-        _gps_source = None
         if _gps_path.exists():
             _gd = _json.loads(_gps_path.read_text())
-            _gps = {'lat': _gd['latitude'], 'lon': _gd['longitude']}
-            _gps_source = 'gnss_fix'
-        elif _gps_fallback.exists():
-            _gd = _json.loads(_gps_fallback.read_text())
-            if 'latitude' in _gd and 'longitude' in _gd:
-                _gps = {'lat': _gd['latitude'], 'lon': _gd['longitude']}
-                _gps_source = 'device_config(fallback)'
-        if _gps:
-            logger.info('GPS loaded [%s]: %s,%s', _gps_source, _gps['lat'], _gps['lon'])
+            # Reject 1: explicit failure marker
+            if _gd.get('status') == 'timeout':
+                logger.warning('GPS rejected: status=timeout (fix unavailable)')
+            # Reject 2: missing coordinates
+            elif 'latitude' not in _gd or 'longitude' not in _gd:
+                logger.warning('GPS rejected: missing lat/lon in fix file')
+            else:
+                # Reject 3: stale fix (> 24h)
+                _fixed_at_str = _gd.get('fixed_at', '')
+                _age_ok = False
+                try:
+                    _fixed_at = _dt.fromisoformat(_fixed_at_str.replace('Z', '+00:00'))
+                    if _fixed_at.tzinfo is None:
+                        _fixed_at = _fixed_at.replace(tzinfo=_tz.utc)
+                    _age = _dt.now(_tz.utc) - _fixed_at
+                    _age_ok = _age < _td(hours=24)
+                    if not _age_ok:
+                        logger.warning('GPS rejected: fix age %s > 24h', _age)
+                except (ValueError, TypeError) as _te:
+                    logger.warning('GPS rejected: unparseable fixed_at=%r (%s)', _fixed_at_str, _te)
+                if _age_ok:
+                    _gps = {'lat': _gd['latitude'], 'lon': _gd['longitude']}
+                    logger.info('GPS loaded [gnss_fix]: %s,%s (age=%s)', _gps['lat'], _gps['lon'], _age)
         else:
-            logger.warning('GPS unavailable: no fix file found')
+            logger.warning('GPS unavailable: /tmp/gnss_fix.json not found')
     except Exception as ge:
         logger.warning('GPS load failed: %s', ge)
     
