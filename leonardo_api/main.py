@@ -27,12 +27,16 @@ app = FastAPI(
 )
 
 # ---------------------------------------------------------------------------
-# CORS（Webセットアップ画面からのリクエストを許可）
-# 本番では setup.leonardo-jr.jp のみに絞ること
+# CORS: Sprint 2.5 (2026-04-19) — 量産機向けにホワイトリスト化
+# 同一オリジン配信が基本（/web 配下の静的HTMLが API と同ドメインから配信される）
+# 以下のオリジンからのクロスオリジン要求のみ許可:
+#   - https://leonardo-jr-api.onrender.com        (Render 本番)
+#   - https://*.taild97a82.ts.net                 (Tailscale Funnel)
+#   - https://*.renaissancepartner.com            (将来の自社ドメイン)
 # ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 実証機では全許可。量産機では制限する。
+    allow_origin_regex=r"^https://(leonardo-jr-api\.onrender\.com|.*\.taild97a82\.ts\.net|.*\.renaissancepartner\.com)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
