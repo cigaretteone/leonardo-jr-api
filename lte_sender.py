@@ -126,8 +126,43 @@ from urllib3.poolmanager import PoolManager
 # ===========================================================
 
 # Phase 1.1: JR API のみに統一（旧 ENDPOINT_URL / BEARER_TOKEN 廃止）
-DEVICE_ID = "LJ-671493E4-QDSF"
-API_TOKEN = "m0lCjXhKXBooGZ87ty_ASxbIQh0iD_MQwrYC-CVYuNU"
+def _load_device_id_for_init() -> str:
+    """Sprint 2-A: device_config.json から device_id を取得。
+
+    失敗時は RuntimeError で即クラッシュ（silent fail を防止）。
+    """
+    import json as _json
+    _path = "/home/manta/leonardo_jr/device_config.json"
+    try:
+        with open(_path, "r", encoding="utf-8") as _f:
+            _did = _json.load(_f)["device_id"]
+            if not _did:
+                raise ValueError("device_id is empty")
+            return _did
+    except (FileNotFoundError, _json.JSONDecodeError, KeyError, ValueError) as _e:
+        raise RuntimeError(
+            f"device_config.json から device_id を読み込めません: {_e}. path={_path}"
+        )
+
+
+DEVICE_ID = _load_device_id_for_init()
+def _load_api_token_for_init() -> str:
+    """Sprint 2-A: 環境変数 LEONARDO_API_TOKEN から取得。
+
+    systemd EnvironmentFile=-/etc/leonardo/secrets.env で注入される。
+    未設定時は起動を停止する（silent fail を防止）。
+    """
+    import os as _os
+    _token = _os.environ.get("LEONARDO_API_TOKEN", "")
+    if not _token:
+        raise RuntimeError(
+            "環境変数 LEONARDO_API_TOKEN が未設定です。"
+            "/etc/leonardo/secrets.env と systemd drop-in を確認してください。"
+        )
+    return _token
+
+
+API_TOKEN = _load_api_token_for_init()
 # --- Always-on mode: skip mmcli modem management (NetworkManager handles connection) ---
 ALWAYS_ON = True
 
@@ -135,7 +170,17 @@ JR_API_URL_TEMPLATE = "https://leonardo-jr-api.onrender.com/api/v1/devices/{}/ev
 
 APN = "ppsim.jp"
 APN_USER = "pp@sim"
-APN_PASSWORD = "jpn"
+def _load_apn_password_for_init() -> str:
+    """Sprint 2-A: 環境変数 LEONARDO_APN_PASSWORD から取得（フォールバック付き）。
+
+    APN password は準秘密情報（SIM キャリア単位で共通）。
+    secrets.env が存在しない旧環境との互換性のためフォールバック値 'jpn' を許容。
+    """
+    import os as _os
+    return _os.environ.get("LEONARDO_APN_PASSWORD", "jpn")
+
+
+APN_PASSWORD = _load_apn_password_for_init()
 NETWORK_INTERFACE = "wwan0"
 
 LTE_QUEUE_DIR = Path("/home/manta/leonardo_jr/lte_queue")
@@ -419,6 +464,24 @@ def enable_modem(modem_index: str) -> bool:
     return False
 
 
+
+
+def get_modem_state(modem_index: str) -> str:
+    """
+    mmcli -m でモデムの現在 state を取得する。
+    Returns: "disabled" / "registered" / "connected" など、取得不可の場合は "unknown"
+    """
+    rc, out, _ = _run(["mmcli", "-m", modem_index])
+    if rc != 0:
+        return "unknown"
+    for line in out.splitlines():
+        lower = line.lower()
+        if "state:" in lower and "power state" not in lower:
+            parts = line.split(":", 1)
+            if len(parts) == 2:
+                return parts[1].strip().lower()
+    return "unknown"
+
 def connect_lte(modem_index: str, apn: Optional[str] = None) -> bool:
     """
     mmcli --simple-connect で APN 接続する。
@@ -482,26 +545,37 @@ def get_bearer_info(modem_index: str) -> Optional[dict]:
 
 
 def setup_network_interface(bearer: dict) -> bool:
+    # wwan0がIPを持っていれば設定済みとみなしてスキップ（keepalive常時接続対応）
+    _rc, _out, _ = _run(["ip", "-4", "addr", "show", NETWORK_INTERFACE])
+    if _rc == 0 and "inet " in _out:
+        _existing = next((l.strip().split()[1] for l in _out.splitlines() if "inet " in l), "?")
+        logger.info("setup_network_interface: %s already has IP %s — skip", NETWORK_INTERFACE, _existing)
+        return True
+
     ip = (bearer["ip"] if bearer else None)
     prefix = bearer["prefix"]
-
     gateway = bearer["gateway"]
     # Set interface UP
-    _run(["ip", "link", "set", NETWORK_INTERFACE, "up"])
+    _run(["sudo", "ip", "link", "set", NETWORK_INTERFACE, "up"])
 
     # Set IP Address
-    _run(["ip", "addr", "flush", "dev", NETWORK_INTERFACE])
-    _run(["ip", "addr", "add", f"{ip}/{prefix}", "dev", NETWORK_INTERFACE])
+    _run(["sudo", "ip", "addr", "flush", "dev", NETWORK_INTERFACE])
+    _run(["sudo", "ip", "addr", "add", f"{ip}/{prefix}", "dev", NETWORK_INTERFACE])
 
     # Policy routing: wwan0 table 100, eth0 untouched
-    _run(["ip", "route", "flush", "table", "100"])
-    _run(["ip", "route", "add", "default", "via", gateway, "dev", NETWORK_INTERFACE, "table", "100"])
+    _run(["sudo", "ip", "route", "flush", "table", "100"])
+    _run(["sudo", "ip", "route", "add", "default", "via", gateway, "dev", NETWORK_INTERFACE, "table", "100"])
     # Clean all old table 100 rules
     for _ in range(20):
-        rc, _, _ = _run(["ip", "rule", "del", "table", "100"], timeout=3)
+        rc, _, _ = _run(["sudo", "ip", "rule", "del", "table", "100"], timeout=3)
         if rc != 0:
             break
-    _run(["ip", "rule", "add", "from", ip, "table", "100"])
+    _run(["sudo", "ip", "rule", "add", "from", ip, "table", "100"])
+
+    # WiFi 切断時も DNS クエリ (to 8.8.8.8) が wwan0 経由で届くよう
+    # メインテーブルに metric 700 のデフォルトルートを追加する。
+    # WiFi が存在する場合は metric の低いルートが優先される。
+    _run(["sudo", "ip", "route", "replace", "default", "via", gateway, "dev", NETWORK_INTERFACE, "metric", "700"])
 
     return True
 
@@ -509,17 +583,21 @@ def setup_network_interface(bearer: dict) -> bool:
 def teardown_network_interface() -> None:
     """
     wwan0 のデフォルトルート・IP アドレスを削除してインターフェースを down にする。
+    ALWAYS_ON=True のときは keepalive サービスが管理するため何もしない。
     エラーは無視する（既に削除済みの場合も想定）。
     # ip route del / addr flush / link down: 約5mA × 2秒 ≈ 0.003mAh
     """
-    _run(["ip", "route", "flush", "table", "100"])
+    if ALWAYS_ON:
+        logger.info("teardown_network_interface: ALWAYS_ON — skip (keepalive manages wwan0)")
+        return
+    _run(["sudo", "ip", "route", "flush", "table", "100"])
     for _ in range(20):
-        rc, _, _ = _run(["ip", "rule", "del", "table", "100"], timeout=3)
+        rc, _, _ = _run(["sudo", "ip", "rule", "del", "table", "100"], timeout=3)
         if rc != 0:
             break
-    _run(["ip", "route", "del", "default", "dev", NETWORK_INTERFACE])
-    _run(["ip", "addr", "flush", "dev", NETWORK_INTERFACE])
-    _run(["ip", "link", "set", NETWORK_INTERFACE, "down"])
+    _run(["sudo", "ip", "route", "del", "default", "dev", NETWORK_INTERFACE])
+    _run(["sudo", "ip", "addr", "flush", "dev", NETWORK_INTERFACE])
+    _run(["sudo", "ip", "link", "set", NETWORK_INTERFACE, "down"])
 
 
 def disconnect_lte(modem_index: str) -> None:
@@ -1000,6 +1078,7 @@ def send_event_with_lte(
     _alert_t.start()
     
     modem_index: Optional[str] = None
+    _need_connect = False  # pre-initialize; set True inside try if setup needed
 
     try:
         # [1] モデムインデックス取得
@@ -1021,12 +1100,30 @@ def send_event_with_lte(
             return False
 
         bearer = None  # ALWAYS_ON: initialize to avoid UnboundLocalError
+        _need_connect = not ALWAYS_ON  # disabled modem detected → set True below
         # [3] AI 推論停止フック（LTE 通信中は推論を停止する）
         if inference_pause:
             inference_pause()
 
         # [4] モデム enable
-        if not ALWAYS_ON:
+        # ALWAYS_ON=True でもモデムが disabled 状態なら enable・接続が必要
+        modem_state = get_modem_state(modem_index)
+        if ALWAYS_ON and modem_state == "disabled":
+            logger.info("ALWAYS_ON だがモデムが disabled → enable・接続を実行 (state=%s)", modem_state)
+            _need_connect = True
+        # ALWAYS_ON: keepalive接続済みの場合、既存のwwan0 IPをSourceIPAdapter用に取得
+        _always_on_wwan_ip: Optional[str] = None
+        if not _need_connect:
+            _rc, _out, _ = _run(["ip", "-4", "addr", "show", NETWORK_INTERFACE])
+            for _line in (_out.splitlines() if _rc == 0 else []):
+                if "inet " in _line:
+                    _always_on_wwan_ip = _line.strip().split()[1].split("/")[0]
+                    break
+            if _always_on_wwan_ip:
+                logger.info("ALWAYS_ON: wwan0 IP=%s (keepalive接続済み)", _always_on_wwan_ip)
+            else:
+                logger.warning("ALWAYS_ON: wwan0 IPが取得できない — wwan_ip=None で送信")
+        if _need_connect:
             if not enable_modem(modem_index):
                 logger.error("モデム enable 失敗: キュー保存して終了")
                 save_to_local_queue(image_path, metadata)
@@ -1034,7 +1131,7 @@ def send_event_with_lte(
 
         # [4.5] APN 自動検出（apn_auto_detect=True 時: MM停止→AT操作→MM再起動→再enable）
         _apn_for_connect: Optional[str] = None
-        if not ALWAYS_ON:
+        if _need_connect:
             _lte_cfg = _load_lte_config()
             if _lte_cfg["apn_auto_detect"]:
                 _apn_for_connect = detect_apn_via_at()
@@ -1050,14 +1147,14 @@ def send_event_with_lte(
                 _apn_for_connect = _lte_cfg["apn_fallback"]
 
         # [5] APN 接続
-        if not ALWAYS_ON:
+        if _need_connect:
             if not connect_lte(modem_index, apn=_apn_for_connect):
                 logger.error("LTE 接続失敗: キュー保存して終了")
                 save_to_local_queue(image_path, metadata)
                 return False
 
         # [6a] Bearer 情報取得
-        if not ALWAYS_ON:
+        if _need_connect:
             bearer = get_bearer_info(modem_index)
             if bearer is None:
                 logger.error("Bearer 情報取得失敗: キュー保存して終了")
@@ -1065,20 +1162,20 @@ def send_event_with_lte(
                 return False
 
         # [6b] ネットワーク設定（IP 付与・デフォルトルート）
-        if not ALWAYS_ON:
+        if _need_connect:
             if not setup_network_interface(bearer):
                 logger.error("ネットワーク設定失敗: キュー保存して終了")
-            save_to_local_queue(image_path, metadata)
-            return False
+                save_to_local_queue(image_path, metadata)
+                return False
 
         # [7] 未送信キューを先に再送（最大 limit=3 件）
         pending = load_local_queue()
         if pending:
-            sent = process_local_queue(wwan_ip=(bearer["ip"] if bearer else None))
+            sent = process_local_queue(wwan_ip=(bearer["ip"] if bearer else _always_on_wwan_ip))
             logger.info("キュー再送: %d 件成功（キュー残: %d 件）", sent, len(pending) - sent)
 
         # [8] 本イベント送信（event_id は metadata に含まれる）
-        result = send_event_http(metadata, (bearer["ip"] if bearer else None))
+        result = send_event_http(metadata, (bearer["ip"] if bearer else _always_on_wwan_ip))
 
         if result.acked:
             logger.info(
@@ -1108,7 +1205,7 @@ def send_event_with_lte(
                     if v_path and v_sha:
                         logger.info('Video ready: %s (%d bytes)', v_path, v_size)
                         v_result = upload_video_http(
-                            metadata['_upload_url'], v_path, v_sha, (bearer['ip'] if bearer else None)
+                            metadata['_upload_url'], v_path, v_sha, (bearer['ip'] if bearer else _always_on_wwan_ip)
                         )
                         if v_result.acked:
                             logger.info('Video uploaded: event_id=%s', metadata['event_id'])
@@ -1151,13 +1248,11 @@ def send_event_with_lte(
         return False
 
     finally:
-        # [9] 切断・disable・ネットワーク削除（常に実行）
-        if modem_index is not None:
-            if not ALWAYS_ON:
-                disconnect_lte(modem_index)
-            if not ALWAYS_ON:
-                disable_modem(modem_index)
-        teardown_network_interface()
+        # [9] 切断・disable・ネットワーク削除（ALWAYS_ON時は_need_connect=Falseのため実行しない）
+        if modem_index is not None and _need_connect:
+            disconnect_lte(modem_index)
+            disable_modem(modem_index)
+            teardown_network_interface()
         # AI 推論再開フック（LTE 通信完了後に推論を再開する）
         if inference_resume:
             inference_resume()
@@ -1696,9 +1791,10 @@ def _run_tests() -> None:
                 self.assertFalse(send_event_with_lte(self.image_path))
 
         def test_full_flow_finally_always_runs_teardown(self) -> None:
-            """connect 失敗でも teardown_network_interface が呼ばれる"""
+            """モデムdisabled時はconnect失敗でもteardown_network_interfaceが呼ばれる"""
             with patch(f"{MOD}.get_modem_index", return_value="0"), \
                  patch(f"{MOD}.get_signal_quality", return_value=80), \
+                 patch(f"{MOD}.get_modem_state", return_value="disabled"), \
                  patch(f"{MOD}.enable_modem", return_value=True), \
                  patch(f"{MOD}.connect_lte", return_value=False), \
                  patch(f"{MOD}.save_to_local_queue", return_value=True), \
