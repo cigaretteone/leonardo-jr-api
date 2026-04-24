@@ -1,0 +1,5 @@
+# Leonardo Jr. GNSS port stabilization
+# SIM7600G-H NMEA interface (ID_USB_INTERFACE_NUM=01) に固定シンリンクを作成
+# reboot 毎の ttyUSBN 番号変動を吸収
+# Note: ATTRS{bInterfaceNumber} は symlink chase 失敗のため ENV に変更
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="1e0e", ENV{ID_MODEL_ID}=="9001", ENV{ID_USB_INTERFACE_NUM}=="01", SYMLINK+="ttyGNSS", MODE="0660", GROUP="dialout"
