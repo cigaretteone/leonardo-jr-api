@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-SERIAL_PORT = "/dev/ttyUSB2"
+SERIAL_PORT = "/dev/ttyGNSS"
 READ_TIMEOUT = 180
 GNSS_JSON_PATH = Path("/tmp/gnss_fix.json")
 DEVICE_CONFIG_PATH = Path("/home/manta/leonardo_jr/device_config.json")
