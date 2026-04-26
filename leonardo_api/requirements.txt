@@ -33,3 +33,4 @@ bcrypt==4.0.1
 
 # Twilio (phone call)
 twilio>=9.0.0
+alembic>=1.13.0
