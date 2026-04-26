@@ -249,3 +249,41 @@ class EventMedia(Base):
         CheckConstraint("upload_status IN ('pending', 'uploading', 'completed', 'failed')", name="chk_upload_status"),
         CheckConstraint("media_type IN ('thumbnail', 'video')", name="chk_media_type"),
     )
+
+
+# =============================================================================
+# DeviceSubscriber (Phase 19)
+# =============================================================================
+
+class DeviceSubscriber(Base):
+    __tablename__ = "device_subscribers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(
+        String(30),
+        ForeignKey("devices.device_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel = Column(String(10), nullable=False)
+    target = Column(String(255), nullable=False)
+    label = Column(String(100), nullable=True)
+    enabled = Column(Boolean, nullable=False, server_default=text("true"))
+    created_at = Column(
+        DateTime(timezone=True), nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "device_id", "channel", "target",
+            name="uq_device_subscribers_device_channel_target",
+        ),
+        CheckConstraint(
+            "channel IN ('line', 'email', 'phone')",
+            name="device_subscribers_channel_check",
+        ),
+    )

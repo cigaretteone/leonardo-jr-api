@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .routers import auth_router, device_router, event_router, location_router, media_router
+from .routers import auth_router, device_router, event_router, location_router, media_router, setup_router
 
 # リポジトリルート / web ディレクトリのパス
 _WEB_DIR = pathlib.Path(__file__).parent.parent / "web"
@@ -49,8 +49,8 @@ app.include_router(auth_router.router, prefix="/api/v1/auth", tags=["認証"])
 app.include_router(device_router.router, prefix="/api/v1/devices", tags=["デバイス"])
 app.include_router(location_router.router, prefix="/api/v1/devices", tags=["位置登録"])
 app.include_router(event_router.router, prefix="/api/v1/devices", tags=["検知イベント"])
-app.include_router(event_router.router, prefix="/api/v1/devices", tags=["検知イベント"])
 app.include_router(media_router.router, prefix="/api/v1/devices", tags=["メディア"])
+app.include_router(setup_router.router, prefix="/api/v1/setup", tags=["v1デモ機セットアップ"])
 
 @app.get("/health", tags=["ヘルスチェック"])
 async def health() -> dict:

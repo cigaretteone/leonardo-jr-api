@@ -17,6 +17,7 @@ pydantic-settings>=2.3.0
 # 認証
 python-jose[cryptography]>=3.3.0   # JWT
 passlib[bcrypt]>=1.7.4             # パスワードハッシュ
+PyJWT>=2.8.0                       # setup_session 用
 
 # HTTP クライアント（IPジオロケーション API 呼び出し）
 httpx>=0.27.0

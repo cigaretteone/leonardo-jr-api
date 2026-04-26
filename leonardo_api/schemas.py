@@ -262,3 +262,35 @@ class MediaInfo(BaseModel):
     created_at: Optional[datetime] = None
     class Config:
         from_attributes = True
+
+
+# =============================================================================
+# Phase 19: セットアップ画面
+# =============================================================================
+
+from typing import Literal
+
+
+class SetupAuthRequest(BaseModel):
+    pin: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class SetupAuthResponse(BaseModel):
+    ok: bool
+
+
+class SubscriberCreate(BaseModel):
+    channel: Literal["line", "email", "phone"]
+    target: str = Field(min_length=1, max_length=255)
+    label: Optional[str] = Field(default=None, max_length=100)
+
+
+class SubscriberOut(BaseModel):
+    id: int
+    channel: str
+    target: str
+    label: Optional[str]
+    enabled: bool
+
+    class Config:
+        from_attributes = True
