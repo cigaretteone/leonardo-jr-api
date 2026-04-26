@@ -10,7 +10,7 @@ main.py — FastAPI アプリケーションエントリーポイント
 
 import pathlib
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -90,6 +90,32 @@ async def health() -> dict:
 # QR コードのURL: /setup?device_id=...&fth=...
 # web/ ディレクトリの静的ファイルをそのまま返す
 # ---------------------------------------------------------------------------
+@app.get("/setup-v1/{device_id}", include_in_schema=False)
+async def setup_v1_page(device_id: str):
+    """Phase 20: v1デモ機 PIN 入力フォーム HTML を返す。"""
+    from sqlalchemy import select
+    from .database import get_db_context
+    from .models import Device
+    async with get_db_context() as db:
+        result = await db.execute(select(Device).where(Device.device_id == device_id))
+        if result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="デバイスが見つかりません")
+    return FileResponse(_WEB_DIR / "v1_setup.html")
+
+
+@app.get("/setup-v1/{device_id}/manage", include_in_schema=False)
+async def setup_v1_manage_page(device_id: str):
+    """Phase 20: v1デモ機 subscribers 管理画面 HTML を返す。"""
+    from sqlalchemy import select
+    from .database import get_db_context
+    from .models import Device
+    async with get_db_context() as db:
+        result = await db.execute(select(Device).where(Device.device_id == device_id))
+        if result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="デバイスが見つかりません")
+    return FileResponse(_WEB_DIR / "subscribers.html")
+
+
 @app.get("/events", include_in_schema=False)
 async def serve_events() -> FileResponse:
     return FileResponse(_WEB_DIR / "events.html")
