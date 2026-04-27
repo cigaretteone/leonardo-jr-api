@@ -97,7 +97,7 @@ def _send_email_sync(to_email: str, subject: str, body: str) -> bool:
             server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             server.send_message(msg)
         return True
-    except smtplib.SMTPException as e:
+    except Exception as e:
         logger.error("メール送信エラー (to=%s): %s", to_email, e)
         return False
 
