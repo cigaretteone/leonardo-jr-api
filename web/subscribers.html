@@ -84,6 +84,11 @@ h1 { font-size: 18px; margin: 0 0 4px; }
   pointer-events: none;
 }
 .toast.show { opacity: 1; }
+.hint-text {
+  font-size: 12px; color: #888;
+  margin-top: -4px; margin-bottom: 8px;
+  padding-left: 4px;
+}
 </style>
 </head>
 <body>
@@ -104,7 +109,8 @@ h1 { font-size: 18px; margin: 0 0 4px; }
         <option value="email">メール</option>
         <option value="phone">電話</option>
       </select>
-      <input type="text" id="target" placeholder="LINE userId / メール / +81xxx">
+      <input type="text" id="target" placeholder="">
+      <div class="hint-text" id="target-hint"></div>
       <input type="text" id="label" placeholder="ラベル (任意、例: 田中さん)">
       <button class="btn-primary" id="add-btn">追加</button>
     </div>
@@ -191,12 +197,77 @@ function escapeHtml(s) {
   }[c]));
 }
 
+const channelEl = document.getElementById('channel');
+const targetEl = document.getElementById('target');
+const hintEl = document.getElementById('target-hint');
+
+const CHANNEL_CONFIG = {
+  line: {
+    placeholder: 'U + 32文字の英数字 (LINE userId)',
+    hint: 'LINE userId は LINE Developers から取得した U で始まる 33 文字の文字列です',
+    inputType: 'text',
+  },
+  email: {
+    placeholder: 'example@domain.com',
+    hint: '正しいメールアドレス形式で入力してください',
+    inputType: 'email',
+  },
+  phone: {
+    placeholder: '+819012345678 または 09012345678',
+    hint: '日本の番号は +81 始まりまたは 0 始まりで入力してください',
+    inputType: 'tel',
+  },
+};
+
+function updateChannelHint() {
+  const config = CHANNEL_CONFIG[channelEl.value];
+  targetEl.placeholder = config.placeholder;
+  targetEl.type = config.inputType;
+  hintEl.textContent = config.hint;
+}
+
+channelEl.addEventListener('change', updateChannelHint);
+updateChannelHint();  // 初期化
+
+function validateTarget(channel, target) {
+  if (channel === 'email') {
+    // 簡易メール検証 (RFC5322 完全準拠ではないが実用十分)
+    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!re.test(target)) {
+      return 'メールアドレスの形式が正しくありません (例: name@domain.com)';
+    }
+    if (target.length > 254) {
+      return 'メールアドレスが長すぎます';
+    }
+  } else if (channel === 'phone') {
+    // E.164 + 日本国内形式を許容
+    const cleaned = target.replace(/[\s\-()]/g, '');
+    const re = /^(\+81[0-9]{9,10}|0[0-9]{9,10})$/;
+    if (!re.test(cleaned)) {
+      return '電話番号の形式が正しくありません (例: +819012345678 または 09012345678)';
+    }
+  } else if (channel === 'line') {
+    // LINE userId は U で始まる 33 文字
+    const re = /^U[0-9a-f]{32}$/;
+    if (!re.test(target)) {
+      return 'LINE userId は U で始まる 33 文字の英数字です';
+    }
+  }
+  return null;  // バリデーション通過
+}
+
 document.getElementById('add-btn').addEventListener('click', async () => {
   const channel = document.getElementById('channel').value;
   const target = document.getElementById('target').value.trim();
   const label = document.getElementById('label').value.trim();
   if (!target) {
     toast('通知先を入力してください');
+    return;
+  }
+  // チャネル別バリデーション
+  const validationError = validateTarget(channel, target);
+  if (validationError) {
+    toast(validationError);
     return;
   }
   try {
