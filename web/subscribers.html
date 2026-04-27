@@ -151,33 +151,38 @@ async function api(path, opts = {}) {
 }
 
 async function load() {
-  const res = await api('/subscribers');
-  if (!res.ok) {
-    listEl.innerHTML = '<div class="empty">読み込みに失敗しました</div>';
-    return;
+  try {
+    const res = await api('/subscribers');
+    if (!res.ok) {
+      listEl.innerHTML = '<div class="empty">読み込みに失敗しました</div>';
+      return;
+    }
+    const items = await res.json();
+    if (items.length === 0) {
+      listEl.innerHTML = '<div class="empty">通知先が登録されていません</div>';
+      return;
+    }
+    listEl.innerHTML = '';
+    items.forEach(item => {
+      const li = document.createElement('li');
+      li.className = 'subscriber-item';
+      li.innerHTML = `
+        <div class="subscriber-info">
+          <span class="subscriber-channel">${item.channel}</span>
+          <span class="subscriber-target">${escapeHtml(item.target)}</span>
+          ${item.label ? `<div class="subscriber-label">${escapeHtml(item.label)}</div>` : ''}
+        </div>
+        <button class="btn-delete" data-id="${item.id}">削除</button>
+      `;
+      listEl.appendChild(li);
+    });
+    listEl.querySelectorAll('.btn-delete').forEach(btn => {
+      btn.addEventListener('click', () => del(parseInt(btn.dataset.id)));
+    });
+  } catch (e) {
+    if (e.message === 'unauthorized') return;
+    listEl.innerHTML = '<div class="empty">通信エラーが発生しました</div>';
   }
-  const items = await res.json();
-  if (items.length === 0) {
-    listEl.innerHTML = '<div class="empty">通知先が登録されていません</div>';
-    return;
-  }
-  listEl.innerHTML = '';
-  items.forEach(item => {
-    const li = document.createElement('li');
-    li.className = 'subscriber-item';
-    li.innerHTML = `
-      <div class="subscriber-info">
-        <span class="subscriber-channel">${item.channel}</span>
-        <span class="subscriber-target">${escapeHtml(item.target)}</span>
-        ${item.label ? `<div class="subscriber-label">${escapeHtml(item.label)}</div>` : ''}
-      </div>
-      <button class="btn-delete" data-id="${item.id}">削除</button>
-    `;
-    listEl.appendChild(li);
-  });
-  listEl.querySelectorAll('.btn-delete').forEach(btn => {
-    btn.addEventListener('click', () => del(parseInt(btn.dataset.id)));
-  });
 }
 
 function escapeHtml(s) {
@@ -194,53 +199,73 @@ document.getElementById('add-btn').addEventListener('click', async () => {
     toast('通知先を入力してください');
     return;
   }
-  const res = await api('/subscribers', {
-    method: 'POST',
-    body: JSON.stringify({ channel, target, label: label || null })
-  });
-  if (res.ok) {
-    document.getElementById('target').value = '';
-    document.getElementById('label').value = '';
-    toast('追加しました');
-    load();
-  } else if (res.status === 409) {
-    toast('同じ通知先がすでに登録されています');
-  } else {
-    toast('追加に失敗しました');
+  try {
+    const res = await api('/subscribers', {
+      method: 'POST',
+      body: JSON.stringify({ channel, target, label: label || null })
+    });
+    if (res.ok) {
+      document.getElementById('target').value = '';
+      document.getElementById('label').value = '';
+      toast('追加しました');
+      load();
+    } else if (res.status === 409) {
+      toast('同じ通知先がすでに登録されています');
+    } else {
+      toast('追加に失敗しました');
+    }
+  } catch (e) {
+    if (e.message === 'unauthorized') return;
+    toast('通信エラーが発生しました');
   }
 });
 
 async function del(id) {
   if (!confirm('この通知先を削除しますか?')) return;
-  const res = await api(`/subscribers/${id}`, { method: 'DELETE' });
-  if (res.ok) {
-    toast('削除しました');
-    load();
-  } else {
-    toast('削除に失敗しました');
+  try {
+    const res = await api(`/subscribers/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      toast('削除しました');
+      load();
+    } else {
+      toast('削除に失敗しました');
+    }
+  } catch (e) {
+    if (e.message === 'unauthorized') return;
+    toast('通信エラーが発生しました');
   }
 }
 
 document.getElementById('test-btn').addEventListener('click', async () => {
-  const res = await api('/test', { method: 'POST' });
-  if (res.ok) {
-    toast('テスト通知を送信しました');
-  } else if (res.status === 501) {
-    toast('テスト通知は Phase 21 で実装予定');
-  } else {
-    toast('送信に失敗しました');
+  try {
+    const res = await api('/test', { method: 'POST' });
+    if (res.ok) {
+      toast('テスト通知を送信しました');
+    } else if (res.status === 501) {
+      toast('テスト通知は Phase 21 で実装予定');
+    } else {
+      toast('送信に失敗しました');
+    }
+  } catch (e) {
+    if (e.message === 'unauthorized') return;
+    toast('通信エラーが発生しました');
   }
 });
 
 document.getElementById('reset-btn').addEventListener('click', async () => {
   if (!confirm('全通知先を削除します。本当によろしいですか?\n\nこの操作は取り消せません。')) return;
   if (!confirm('もう一度確認します。本当に全削除しますか?')) return;
-  const res = await api('/reset', { method: 'POST' });
-  if (res.ok) {
-    toast('全通知先を削除しました');
-    load();
-  } else {
-    toast('削除に失敗しました');
+  try {
+    const res = await api('/reset', { method: 'POST' });
+    if (res.ok) {
+      toast('全通知先を削除しました');
+      load();
+    } else {
+      toast('削除に失敗しました');
+    }
+  } catch (e) {
+    if (e.message === 'unauthorized') return;
+    toast('通信エラーが発生しました');
   }
 });
 
