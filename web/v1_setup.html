@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <meta name="robots" content="noindex,nofollow">
 <title>Leonardo Jr. セットアップ</title>
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <style>
 * { box-sizing: border-box; }
 body {
@@ -65,6 +66,40 @@ button:disabled { background: #aaa; cursor: not-allowed; }
   <div class="hint">PIN は本体側面の QR ラベルに記載されています</div>
 </div>
 <script>
+// LIFF init: liff.state があれば自動で manage 画面へ遷移する
+// LIFF_ID は manage 画面の /api/v1/setup/{device_id}/config から取得できるが、
+// この時点では未認証なので config API は呼べない。
+// 代わりに環境変数を埋め込んだ固定 LIFF_ID をハードコードする方式は避け、
+// 認証不要の専用エンドポイントを作る代わりに、ここでは liff.init を
+// パラメータ付き URL の場合のみ実行する。
+(async function liffBootstrap() {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has('liff.state') && !params.has('liffClientId')) {
+    return;  // LIFF 経由でないアクセスはスキップ
+  }
+  if (typeof liff === 'undefined') return;
+
+  // liffClientId クエリパラメータから LIFF_ID を取得
+  // (LIFF が cold start 時に付与する形式: liffClientId=<channel_id>)
+  // ただしこれは正確な LIFF ID とは異なる場合があるため、
+  // /api/v1/setup/{device_id}/liff_id 形式の認証不要エンドポイントを
+  // 別途用意する方が安全。
+  // 暫定対応: liff.state があれば manage 画面に手動 redirect する。
+  const liffState = params.get('liff.state');
+  if (liffState) {
+    // liff.state は URL エンコードされたパス (例: /manage?liff.hback=2)
+    // これを manage 画面の URL に変換して遷移
+    const decodedPath = decodeURIComponent(liffState);
+    if (decodedPath.startsWith('/manage')) {
+      // 現在の URL をベースに manage 画面 URL を構築
+      const segments = window.location.pathname.split('/').filter(Boolean);
+      const did = segments[1];
+      window.location.replace(`/setup-v1/${did}/manage${decodedPath.replace("/manage", "")}`);
+      return;
+    }
+  }
+})();
+
 const deviceId = window.location.pathname.split('/').filter(Boolean)[1];
 document.getElementById('device-id').textContent = deviceId;
 
