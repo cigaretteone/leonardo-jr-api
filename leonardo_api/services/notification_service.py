@@ -17,7 +17,11 @@ from email.mime.text import MIMEText
 
 import httpx
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from ..config import settings
+from ..models import DeviceSubscriber
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,16 @@ def _parse_notification_target(notification_target_json: str | None) -> dict:
     except (json.JSONDecodeError, TypeError):
         logger.warning("notification_target のパースに失敗: %s", notification_target_json)
         return {}
+
+
+async def _get_subscribers(db: AsyncSession, device_id: str) -> list[DeviceSubscriber]:
+    """device_subscribers テーブルから enabled な行を取得する。"""
+    result = await db.execute(
+        select(DeviceSubscriber)
+        .where(DeviceSubscriber.device_id == device_id)
+        .where(DeviceSubscriber.enabled == True)
+    )
+    return list(result.scalars().all())
 
 
 async def _send_line_notify(line_token: str, message: str) -> bool:
@@ -165,20 +179,17 @@ async def send_detection_notification(
     latitude: float | None = None,
     longitude: float | None = None,
     occurred_at=None,
+    db: AsyncSession | None = None,
 ) -> None:
     """
-    検知イベントを所有者に通知する。
+    検知イベントを通知する。
 
-    notification_target に line_token があれば LINE Notify、
-    email があればメールで送信する。
+    Phase 21: subscribers 優先 + notification_target フォールバック。
+    db が渡され subscribers に enabled な行があればそちらを使い、
+    なければ既存 notification_target JSON 経由で通知する。
     """
-    target = _parse_notification_target(notification_target_json)
-    if not target:
-        logger.debug("通知先が未設定のためスキップ (device_id=%s)", device_id)
-        return
-
+    # メッセージ整形 (共通)
     label = {"bear": "熊", "person": "人", "human": "人", "vehicle": "車両"}.get(detection_type, detection_type)
-    # Format time in JST
     time_str = "不明"
     if occurred_at:
         try:
@@ -188,13 +199,13 @@ async def send_detection_notification(
             time_str = jst_time.strftime("%Y/%m/%d %H:%M:%S JST")
         except Exception:
             time_str = str(occurred_at)
-    # GPS info
     gps_str = "不明"
     map_link = ""
     if latitude and longitude:
         gps_str = f"{latitude:.6f}, {longitude:.6f}"
         map_link = f"https://maps.google.com/maps?q={latitude},{longitude}"
-    message = (
+
+    full_message = (
         f"\n【Leonardo Jr. 検知アラート】\n"
         f"デバイス: {device_id}\n"
         f"検知対象: {label}\n"
@@ -203,13 +214,50 @@ async def send_detection_notification(
         f"GPS座標: {gps_str}\n"
         + (f"地図: {map_link}\n" if map_link else "")
     )
+    line_short = (
+        f"\u3010Leonardo Jr.\u3011\n"
+        f"{label}\u3092\u691c\u77e5\u3057\u307e\u3057\u305f\n"
+        f"\u4fe1\u983c\u5ea6: {confidence * 100:.0f}%\n"
+        f"\u6642\u523b: {time_str}\n"
+        + (f"\u5730\u56f3: {map_link}\n" if map_link else "")
+        + f"\n\u25b6 \u78ba\u8a8d: https://leonardo-jr-api.onrender.com/events"
+    )
+
+    # subscribers 優先
+    subscribers = []
+    if db is not None:
+        try:
+            subscribers = await _get_subscribers(db, device_id)
+        except Exception as e:
+            logger.warning("subscribers の取得に失敗、フォールバックします: %s", e)
+            subscribers = []
+
+    if subscribers:
+        await _dispatch_to_subscribers(
+            subscribers=subscribers,
+            device_id=device_id,
+            label=label,
+            detection_type=detection_type,
+            confidence=confidence,
+            latitude=latitude,
+            longitude=longitude,
+            full_message=full_message,
+            line_short=line_short,
+            email_subject=f"【Leonardo Jr.】{label}を検知しました",
+        )
+        return
+
+    # フォールバック: 既存 notification_target 経由
+    target = _parse_notification_target(notification_target_json)
+    if not target:
+        logger.debug("通知先が未設定のためスキップ (device_id=%s)", device_id)
+        return
 
     if line_token := target.get("line_token"):
-        await _send_line_notify(line_token, message)
+        await _send_line_notify(line_token, full_message)
 
-    if email := target.get("email"):
-      if target.get("email_enabled", True) is False:
-        logger.info("Email disabled by user settings")
+    email = target.get("email")
+    if email and target.get("email_enabled", True) is False:
         email = None
     if email:
         _em_now = _time.time()
@@ -221,39 +269,73 @@ async def send_detection_notification(
                 _send_email_sync,
                 email,
                 f"【Leonardo Jr.】{label}を検知しました",
-                message,
+                full_message,
             )
         else:
             logger.info("Email cooldown active (%ds left)", int(EMAIL_COOLDOWN_SEC - (_em_now - _em_last)))
 
-
-    # ── LINE Messaging API (immediate) ──
-    if line_uid := target.get("line_user_id"):
-      if target.get("line_enabled", True) is False:
-        logger.info("LINE disabled by user settings")
+    line_uid = target.get("line_user_id")
+    if line_uid and target.get("line_enabled", True) is False:
         line_uid = None
     if line_uid:
-        map_link = f"https://maps.google.com/maps?q={latitude},{longitude}" if latitude and longitude else ""
-        line_msg = (
-            f"\u3010Leonardo Jr.\u3011\n"
-            f"{label}\u3092\u691c\u77e5\u3057\u307e\u3057\u305f\n"
-            f"\u4fe1\u983c\u5ea6: {confidence * 100:.0f}%\n"
-            f"\u6642\u523b: {time_str}\n"
-            + (f"\u5730\u56f3: {map_link}\n" if map_link else "")
-            + f"\n\u25b6 \u78ba\u8a8d: https://leonardo-jr-api.onrender.com/events"
-        )
-        await _send_line_message(line_uid, line_msg)
+        await _send_line_message(line_uid, line_short)
 
-    # ── Phone call (bear only, 5min cooldown) ──
-    if phone := target.get("phone"):
-      if target.get("call_enabled", True) is False:
-        logger.info("Phone call disabled by user settings")
+    phone = target.get("phone")
+    if phone and target.get("call_enabled", True) is False:
         phone = None
-    if phone:
-        if detection_type in ("bear",):
-            import asyncio
+    if phone and detection_type in ("bear",):
+        import asyncio
+        await asyncio.to_thread(
+            _make_phone_call, phone, detection_type, confidence,
+            device_id, latitude, longitude,
+        )
+
+
+async def _dispatch_to_subscribers(
+    subscribers: list[DeviceSubscriber],
+    device_id: str,
+    label: str,
+    detection_type: str,
+    confidence: float,
+    latitude: float | None,
+    longitude: float | None,
+    full_message: str,
+    line_short: str,
+    email_subject: str,
+) -> None:
+    """subscribers 経由で channel 別に通知配信する。"""
+    import asyncio
+
+    line_subs = [s for s in subscribers if s.channel == "line"]
+    email_subs = [s for s in subscribers if s.channel == "email"]
+    phone_subs = [s for s in subscribers if s.channel == "phone"]
+
+    # LINE: 即時送信、cooldown なし
+    for s in line_subs:
+        await _send_line_message(s.target, line_short)
+
+    # Email: device 単位で 120秒 cooldown を共有
+    if email_subs:
+        _em_now = _time.time()
+        _em_last = _last_email_times.get(device_id, 0)
+        if _em_now - _em_last >= EMAIL_COOLDOWN_SEC:
+            _last_email_times[device_id] = _em_now
+            for s in email_subs:
+                await asyncio.to_thread(
+                    _send_email_sync, s.target, email_subject, full_message,
+                )
+        else:
+            logger.info(
+                "Email cooldown active (%ds left), %d subscribers skipped",
+                int(EMAIL_COOLDOWN_SEC - (_em_now - _em_last)),
+                len(email_subs),
+            )
+
+    # Phone: bear のみ、device 単位で 300秒 cooldown を共有
+    if phone_subs and detection_type == "bear":
+        for s in phone_subs:
             await asyncio.to_thread(
-                _make_phone_call, phone, detection_type, confidence,
+                _make_phone_call, s.target, detection_type, confidence,
                 device_id, latitude, longitude,
             )
 
@@ -263,37 +345,116 @@ async def send_mismatch_alert(
     device_id: str,
     distance_km: float | None,
     event_region: str,
+    db: AsyncSession | None = None,
 ) -> None:
-    """
-    位置逸脱を所有者に通知する。
-
-    実証機では通知のみ。自動ロックはしない（設計書 §7.3）。
-    """
-    target = _parse_notification_target(notification_target_json)
-    if not target:
-        return
-
+    """位置逸脱を通知する。subscribers 優先 + notification_target フォールバック。"""
     dist_str = f"{distance_km:.0f}km" if distance_km is not None else "不明"
-    message = (
+    full_message = (
         f"\n【Leonardo Jr. 位置逸脱アラート】\n"
         f"デバイス: {device_id}\n"
         f"発報地域: {event_region or '不明'}\n"
         f"登録座標との距離: {dist_str}\n"
         f"※ デバイスが設置場所から大きく離れた場所から通信しています。"
     )
+    line_short = full_message
+    email_subject = "【Leonardo Jr.】位置逸脱を検知しました"
+
+    subscribers = []
+    if db is not None:
+        try:
+            subscribers = await _get_subscribers(db, device_id)
+        except Exception as e:
+            logger.warning("subscribers の取得に失敗、フォールバックします: %s", e)
+            subscribers = []
+
+    if subscribers:
+        # 位置逸脱は phone 通知しない (bear ではないので)
+        await _dispatch_to_subscribers(
+            subscribers=subscribers,
+            device_id=device_id,
+            label="",
+            detection_type="mismatch",
+            confidence=1.0,
+            latitude=None,
+            longitude=None,
+            full_message=full_message,
+            line_short=line_short,
+            email_subject=email_subject,
+        )
+        return
+
+    target = _parse_notification_target(notification_target_json)
+    if not target:
+        return
 
     if line_token := target.get("line_token"):
-        await _send_line_notify(line_token, message)
+        await _send_line_notify(line_token, full_message)
 
-    if email := target.get("email"):
-      if target.get("email_enabled", True) is False:
-        logger.info("Email disabled by user settings")
+    email = target.get("email")
+    if email and target.get("email_enabled", True) is False:
         email = None
     if email:
         import asyncio
         await asyncio.to_thread(
-            _send_email_sync,
-            email,
-            "【Leonardo Jr.】位置逸脱を検知しました",
-            message,
+            _send_email_sync, email, email_subject, full_message,
         )
+
+
+async def send_test_notification(
+    db: AsyncSession,
+    device_id: str,
+) -> dict:
+    """
+    Phase 21 テスト通知。subscribers の LINE / email にのみ送信する。
+    電話は発信しない (TP社のデモ中の混乱回避)。
+
+    Returns: { "line_sent": int, "email_sent": int, "phone_skipped": int }
+    """
+    import asyncio
+    from datetime import datetime, timezone, timedelta
+
+    subscribers = await _get_subscribers(db, device_id)
+    if not subscribers:
+        return {"line_sent": 0, "email_sent": 0, "phone_skipped": 0}
+
+    jst = timezone(timedelta(hours=9))
+    now_jst = datetime.now(jst).strftime("%Y/%m/%d %H:%M:%S JST")
+
+    line_msg = (
+        "【Leonardo Jr.】\n"
+        "テスト通知です。\n"
+        "動作確認のメッセージです。\n"
+        f"送信時刻: {now_jst}"
+    )
+    email_subject = "[TEST]【Leonardo Jr.】動作確認テスト"
+    email_body = (
+        f"\nLeonardo Jr. テスト通知\n"
+        f"動作確認のメッセージです。\n\n"
+        f"デバイス: {device_id}\n"
+        f"送信時刻: {now_jst}\n"
+        f"\nこのメールはテスト通知ボタンから送信されました。\n"
+        f"検知時の通知ではありません。\n"
+    )
+
+    line_subs = [s for s in subscribers if s.channel == "line"]
+    email_subs = [s for s in subscribers if s.channel == "email"]
+    phone_subs = [s for s in subscribers if s.channel == "phone"]
+
+    line_sent = 0
+    for s in line_subs:
+        if await _send_line_message(s.target, line_msg):
+            line_sent += 1
+
+    email_sent = 0
+    for s in email_subs:
+        ok = await asyncio.to_thread(
+            _send_email_sync, s.target, email_subject, email_body,
+        )
+        if ok:
+            email_sent += 1
+
+    return {
+        "line_sent": line_sent,
+        "email_sent": email_sent,
+        "phone_skipped": len(phone_subs),
+    }

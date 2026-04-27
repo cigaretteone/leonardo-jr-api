@@ -139,8 +139,15 @@ async def delete_subscriber(
 )
 async def test_notification(
     device_id: Annotated[str, Depends(require_setup_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    raise HTTPException(status_code=501, detail="Phase 21 で実装予定")
+    """テスト通知を送信。電話は発信しない。"""
+    from ..services.notification_service import send_test_notification
+    result = await send_test_notification(db, device_id)
+    return {
+        "ok": True,
+        **result,
+    }
 
 
 @router.post(

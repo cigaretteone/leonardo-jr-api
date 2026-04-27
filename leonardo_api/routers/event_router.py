@@ -250,6 +250,7 @@ async def receive_event(
             latitude=float(body.latitude) if body.latitude else None,
             longitude=float(body.longitude) if body.longitude else None,
             occurred_at=body.occurred_at,
+            db=db,
         )
         if mismatch:
             await send_mismatch_alert(
@@ -257,6 +258,7 @@ async def receive_event(
                 device_id,
                 distance_km,
                 event_region,
+                db=db,
             )
     except Exception as exc:
         logger.error("Notification error: %s", exc)
