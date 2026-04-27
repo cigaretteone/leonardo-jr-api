@@ -162,3 +162,17 @@ async def reset_subscribers(
     )
     await db.commit()
     return {"ok": True}
+
+
+@router.get(
+    "/{device_id}/config",
+    summary="フロントエンド用設定 (LIFF_ID 等)",
+)
+async def get_setup_config(
+    device_id: Annotated[str, Depends(require_setup_session)],
+) -> dict:
+    """セットアップ画面で使う設定値を返す。"""
+    import os
+    return {
+        "liff_id": os.environ.get("LIFF_ID", ""),
+    }
